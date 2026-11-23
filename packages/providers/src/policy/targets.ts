@@ -22,6 +22,7 @@ import { projectConfigWrite } from "./project-config";
 import { loginRisk, touchesProviderLogin } from "./provider-logins";
 import { braceAlternatives } from "./secrets";
 import type { ShellDialect } from "./shell";
+import type { Input } from "./stdin-scripts";
 
 /**
  * What the risk classifier (`./risk`) judges besides command lines (§11.2): a file written or
@@ -39,6 +40,8 @@ export interface RiskContext extends PathContext {
   currentBranch?: () => string | undefined;
   /** The functions the command line being read has defined (`./blocks`); callers leave it out. */
   functions?: FunctionTable;
+  /** What the commands being read get on their input (`./stdin-scripts`); callers leave it out. */
+  stdin?: Input;
 }
 
 /**

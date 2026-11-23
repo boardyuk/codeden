@@ -19,7 +19,7 @@ export interface Feed {
 }
 
 /** What a command reads on its input: the text when it is written out, and whether that is all. */
-interface Input {
+export interface Input {
   text: string;
   /** True when the shell fills in parts of it, or it isn't written out at all. */
   dynamic: boolean;
@@ -47,7 +47,12 @@ const literal = (cmd: SimpleCommand, word: string): boolean =>
 /** What `cmd` reads from a heredoc or a here-string of its own, the last one given. */
 function ownInput(cmd: SimpleCommand): Input | undefined {
   const heredoc = cmd.heredocs?.at(-1);
-  if (heredoc) return { text: heredoc.body, dynamic: !heredoc.quoted && /[$`]/.test(heredoc.body) };
+  if (heredoc?.quoted) return { text: heredoc.body, dynamic: false };
+  if (heredoc) {
+    // The shell takes the backslash out of `\$`, `` \` `` and `\\` before the command reads the body.
+    const text = heredoc.body.replace(/\\([$`\\])/g, "$1");
+    return { text, dynamic: /[$`]/.test(heredoc.body.replace(/\\[$`\\]/g, "")) };
+  }
   const word = cmd.input?.at(-1);
   return word === undefined ? undefined : { text: word, dynamic: !literal(cmd, word) };
 }
@@ -64,10 +69,14 @@ function printed(source: SimpleCommand): Input {
   return { text, dynamic: source.nested.length > 0 || !words.every((w) => literal(source, w)) };
 }
 
-/** What `cmd` reads on its input; undefined when nothing feeds it. */
-function inputOf(cmd: SimpleCommand, feed: Feed): Input | undefined {
+/**
+ * What `cmd` reads on its input; undefined when nothing feeds it. `inherited`: what the subshell,
+ * block, function or script it is in reads, which is its input too (`… | (sh)`, `{ sh; } <<EOF`).
+ */
+function inputOf(cmd: SimpleCommand, feed: Feed, inherited?: Input): Input | undefined {
   const own = ownInput(cmd);
-  if (own || !cmd.piped) return own;
+  if (own) return own;
+  if (!cmd.piped) return inherited;
   if (!feed.source) return UNKNOWN;
   const out = printed(feed.source);
   return feed.filtered ? { ...out, dynamic: true } : out;
@@ -96,11 +105,12 @@ export function stdinScripts(
   bin: string,
   args: string[],
   feed: Feed,
+  inherited?: Input,
 ): InlineScript[] {
   const dialect = dialectOf(bin);
   if (!dialect) return [];
   const sourced = dialect === "posix" ? substituted(cmd, args) : undefined;
-  const input = sourced ?? (runsStdin(cmd) ? inputOf(cmd, feed) : undefined);
+  const input = sourced ?? (runsStdin(cmd) ? inputOf(cmd, feed, inherited) : undefined);
   return input ? [{ text: input.text, dialect, dynamic: input.dynamic }] : [];
 }
 
@@ -112,7 +122,45 @@ const CODE = /^(?:(?:python|pypy)[\d.]*|py|node|nodejs|perl|ruby)$/;
  * `echo '…' | node`): the code when it is written out, and whether some of it is only known when
  * it runs.
  */
-export function stdinCode(cmd: SimpleCommand, bin: string, feed: Feed): Input | undefined {
+export function stdinCode(
+  cmd: SimpleCommand,
+  bin: string,
+  feed: Feed,
+  inherited?: Input,
+): Input | undefined {
   if (!CODE.test(bin) || !runsStdin(cmd)) return undefined;
-  return inputOf(cmd, feed);
+  return inputOf(cmd, feed, inherited);
+}
+
+/** A context that carries what the commands being read get on their input. */
+export interface WithStdin {
+  /** Set by the classifier as it reads a command line; callers leave it out. */
+  stdin?: Input;
+}
+
+/** Words that close a POSIX group or loop, which a redirect after them feeds: `} <<EOF`. */
+const CLOSERS = new Set(["}", "done", "fi", "esac"]);
+
+/**
+ * `list` with the heredoc or here-string written after a POSIX group or loop (`{ sh; } <<EOF`)
+ * given to the commands before it that have no input of their own: they are the ones it feeds.
+ */
+export function groupInputs(list: SimpleCommand[]): SimpleCommand[] {
+  const at = list.findLastIndex((c) => CLOSERS.has(c.words[0] ?? "") && ownInput(c) !== undefined);
+  if (at <= 0) return list;
+  const { heredocs, input } = list[at] as SimpleCommand;
+  return list.map((cmd, i) =>
+    i < at && !cmd.piped && !ownInput(cmd) ? { ...cmd, heredocs, input } : cmd,
+  );
+}
+
+/**
+ * `ctx` for what runs inside `cmd` (its subshells and substitutions, its blocks, a function it
+ * calls, a script it runs): they read what it reads. What a `>(…)` reads is the command's own
+ * output, which isn't followed.
+ */
+export function within<T extends WithStdin>(ctx: T, cmd: SimpleCommand, feed: Feed): T {
+  const fed = cmd.words.some((w) => w.startsWith(">(")) ? UNKNOWN : undefined;
+  const stdin = fed ?? inputOf(cmd, feed, ctx.stdin);
+  return stdin === ctx.stdin ? ctx : { ...ctx, stdin };
 }

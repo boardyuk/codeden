@@ -177,6 +177,11 @@ function searchDelete(
  */
 export function listedPaths(source: SimpleCommand, ctx: DeleteContext): string[] {
   const { tokens } = unwrap(source.words);
+  // PowerShell: strings at the head of a pipe are the items themselves (`'C:\x','C:\y' | ri`).
+  const text = (word: string) => source.quoted?.has(word) === true || ARRAY.test(word);
+  if (ctx.shell !== "posix" && tokens.length > 0 && tokens.every(text)) {
+    return tokens.flatMap((word) => wordPaths(source, word)).flatMap(arrayItems);
+  }
   const bin = binName(tokens[0]);
   const args = tokens.slice(1);
   const paths =
@@ -188,6 +193,16 @@ export function listedPaths(source: SimpleCommand, ctx: DeleteContext): string[]
           switchesOf(bin, ctx),
         );
   return paths.length > 0 || !LISTINGS.has(bin) ? paths : ["."];
+}
+
+/** PowerShell's array of strings: `@('a','b')`. */
+const ARRAY = /^@\((.*)\)$/s;
+
+/** The strings of a PowerShell array, or the word itself. */
+function arrayItems(word: string): string[] {
+  const array = ARRAY.exec(word);
+  if (!array) return [word];
+  return [...(array[1] as string).matchAll(/'([^']*)'|"([^"]*)"/g)].map((m) => m[1] ?? m[2] ?? "");
 }
 
 /**

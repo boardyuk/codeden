@@ -36,7 +36,7 @@ import { codedenFolderRisk, folderRisk } from "./run-folder";
 import { secretArgument, toolOutputs } from "./secrets";
 import type { SimpleCommand } from "./shell";
 import { shellReadings } from "./shell-readings";
-import type { Feed } from "./stdin-scripts";
+import { type Feed, within } from "./stdin-scripts";
 import { classifyRead, classifyWrite, type RiskContext } from "./targets";
 import { UNRESOLVED, unresolvedTarget } from "./variables";
 import { gitWrites, toolWrites } from "./write-tools";
@@ -130,11 +130,12 @@ function firstInList(
     const piped = list[i + 1]?.piped === true;
     const feed = feedOf(list, i, head);
     for (const here of heres) {
+      const inside = within(here, cmd, feed);
       for (const nested of cmd.nested) {
-        const found = firstInList(nested, here, depth, check, true);
+        const found = firstInList(nested, inside, depth, check, true);
         if (found) return found;
       }
-      for (const ran of ranLists(cmd, here)) {
+      for (const ran of ranLists(cmd, inside)) {
         const found = firstInList(ran.list, ran.ctx, depth, check, feeds || piped);
         if (found) return found;
       }
@@ -144,7 +145,7 @@ function firstInList(
       ];
       for (const script of scripts) {
         const into = feeds || piped || script.feeds === true;
-        const there = scriptContext(script, cmd, here);
+        const there = scriptContext(script, cmd, inside);
         for (const inner of readings(script, there)) {
           const found = firstInList(inner, there, depth + 1, check, into);
           if (found) return found;
@@ -212,14 +213,16 @@ function classifyList(
     const shown = output === "shown" && list[i + 1]?.piped !== true;
     const at = { namesOnly: names.listings.has(i), shown, ...feedOf(list, i, head) };
     for (const here of heres) {
+      const inside = within(here, cmd, at);
       for (const [k, nested] of cmd.nested.entries()) {
         const into = k === 0 && names.projections.has(i) ? "names" : "feeds";
-        found.push(classifyList(nested, here, depth, into));
+        found.push(classifyList(nested, inside, depth, into));
       }
-      for (const ran of ranLists(cmd, here)) {
+      for (const ran of ranLists(cmd, inside)) {
         found.push(classifyList(ran.list, ran.ctx, depth, shown ? "shown" : "feeds"));
       }
-      for (const one of withKept(cmd)) found.push(classifySimple(one, here, depth, at));
+      const placed = { ...at, inside };
+      for (const one of withKept(cmd)) found.push(classifySimple(one, here, depth, placed));
     }
     heres = locationsThrough(cmd, heres);
     if (heres.length > MAX_LOCATIONS) return mostSevere([...found, TOO_MANY_LOCATIONS]);
@@ -241,6 +244,8 @@ function withKept(cmd: SimpleCommand): SimpleCommand[] {
 interface Placement extends Feed {
   namesOnly: boolean;
   shown: boolean;
+  /** The context of what the command runs inside itself, which reads its input (`within`). */
+  inside: RiskContext;
 }
 
 /**
@@ -296,7 +301,7 @@ function classifyActions(
   for (const script of scriptsOf(cmd, ctx, depth, at)) {
     if (script.elevated) found.push(risky("other", "Runs a command with elevated privileges"));
     const output = at.shown && !script.feeds ? "shown" : "feeds";
-    const there = scriptContext(script, cmd, ctx);
+    const there = scriptContext(script, cmd, { ...ctx, stdin: at.inside.stdin });
     const lists = readings(script, there);
     const into = script.commands ? late : ran;
     for (const list of lists) into.push(classifyList(list, there, depth + 1, output));
@@ -310,7 +315,7 @@ function classifyActions(
       if (guess.risky && guess.action === "outside_worktree") ran.push(guess);
     }
   }
-  const code = codeOf(cmd, at);
+  const code = codeOf(cmd, at, ctx);
   if (code.unknown) ran.push(risky("other", `${UNKNOWN} (${bin})`));
   // A risk that was read comes before one that is only "unknown".
   const unknown = (r: RiskAssessment) => r.risky && r.reason.startsWith(UNKNOWN);
@@ -367,6 +372,7 @@ function classifyActions(
   const handed = dotnet.piped && at.source ? listedPaths(at.source, ctx) : [];
   for (const target of [...dotnet.targets, ...handed]) found.push(classifyWrite(target, ctx));
   if (dotnet.unknown) found.push(risky("outside_worktree", `Writes ${UNRESOLVED}`));
+  for (const item of dotnet.reads) found.push(classifyRead(item, ctx));
   // A one-liner's code: the rooted paths it names, when it writes or deletes (`./inline-code`).
   for (const text of code.code) {
     for (const target of inlineCodeWrites(text)) {

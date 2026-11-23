@@ -23,8 +23,8 @@ const climbs = (word: string): number => word.split(/[\\/]+/).filter((s) => s ==
 /** True when a word starts at the root or the home folder, as a POSIX shell reads it. */
 const anchored = (word: string): boolean => /^[/~]/.test(word);
 
-/** A program's plain name, with no folder before it. */
-const PLAIN_NAME = /^[\w.+-]+$/;
+/** A program's plain name, or its POSIX path (`/usr/bin/rm`). */
+const PLAIN_NAME = /^[\w.+/-]+$/;
 
 /**
  * The text of a word that held a backslash escape: `kept` as written, `plain` with the escapes

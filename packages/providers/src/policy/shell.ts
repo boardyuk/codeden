@@ -254,6 +254,7 @@ class Lexer {
     const start = this.i;
     this.i += 1;
     b.cmd.nested.push(this.list("`"));
+    b.expands();
     b.add(src.slice(start, this.i));
   }
 
@@ -287,6 +288,7 @@ class Lexer {
         const start = this.i;
         this.i += 1;
         b.cmd.nested.push(this.list("`"));
+        b.expands();
         text += src.slice(start, this.i);
       } else if (c === "$" && next === "(") {
         const start = this.i;

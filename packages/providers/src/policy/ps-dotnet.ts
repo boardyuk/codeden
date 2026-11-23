@@ -5,8 +5,8 @@ import { holdsVariable } from "./variables";
  * Files PowerShell writes or deletes without a cmdlet (§11.2), through .NET's static methods:
  * `[IO.File]::Delete('x')`, `[IO.Directory]::Delete('x', $true)`, `[IO.File]::WriteAllText(…)`,
  * `::Move`, `::Copy` and their kin, also written `[System.IO.File]`. The risk classifier judges
- * each path they are given as a write. Methods that only read (`ReadAllText`, `Exists`) and other
- * types (`[IO.Path]::Combine`) are left alone.
+ * each path they are given as a write, and a file one reads (`ReadAllText`, the source of a `Copy`)
+ * as a read, so a secrets file asks. Other types (`[IO.Path]::Combine`) are left alone.
  */
 
 /** What the .NET calls in a command change. */
@@ -17,10 +17,12 @@ export interface DotnetWrites {
   piped: boolean;
   /** True when one is built when the command runs (a variable, an expression). */
   unknown: boolean;
+  /** The paths the calls only read (`ReadAllText`, `OpenRead`, the source of a `Copy`). */
+  reads: string[];
 }
 
 /** A static call on `File` or `Directory`: the method, then its arguments up to the `)`. */
-const CALL = /\[(?:System\.)?IO\.(?:File|Directory)\]::(\w+)\s*\(/gi;
+const CALL = /\[\s*(?:System\.)?IO\.(?:File|Directory)\s*\]\s*::\s*(\w+)\s*\(/gi;
 /** Methods that change the path they are given first. */
 const CHANGES = /^(?:Delete|Write\w*|Append\w*|Create\w*|Open|OpenWrite|Encrypt|Decrypt|Set\w+)$/i;
 
@@ -30,6 +32,10 @@ function written(method: string): number[] {
   if (/^Copy$/i.test(method)) return [1];
   return CHANGES.test(method) && !/^SetCurrentDirectory$/i.test(method) ? [0] : [];
 }
+
+/** The positions of the arguments `method` reads: a file's text, or the source of a copy. */
+const read = (method: string): number[] =>
+  /^(?:Read\w*|OpenRead|OpenText|Open|Copy|Move|GetFiles|EnumerateFiles)$/i.test(method) ? [0] : [];
 
 /** The arguments of a call whose `(` is just before `from`: split at its commas, quotes kept. */
 function argumentsAt(text: string, from: number): string[] {
@@ -56,10 +62,15 @@ function argumentsAt(text: string, from: number): string[] {
 
 /** The paths the .NET file calls in `cmd` write or delete. */
 export function dotnetWrites(cmd: SimpleCommand): DotnetWrites {
-  const found: DotnetWrites = { targets: [], piped: false, unknown: false };
-  for (const word of cmd.words) {
+  const found: DotnetWrites = { targets: [], piped: false, unknown: false, reads: [] };
+  // The words joined again: PowerShell allows spaces in `[ IO.File ]:: Delete( 'x' )`.
+  for (const word of [cmd.words.join(" ")]) {
     for (const call of word.matchAll(CALL)) {
       const args = argumentsAt(word, call.index + call[0].length);
+      for (const at of read(call[1] as string)) {
+        const text = /^(['"])(.*)\1$/s.exec(args[at] ?? "")?.[2];
+        if (text) found.reads.push(text);
+      }
       for (const at of written(call[1] as string)) {
         const arg = args[at];
         if (arg === undefined) continue;

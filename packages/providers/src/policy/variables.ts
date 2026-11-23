@@ -89,6 +89,7 @@ function substitute(
   value: (name: string) => string | undefined,
 ): SimpleCommand {
   const vars = new Set<string>();
+  const quoted = new Set(cmd.quoted);
   const fill = (word: string): string => {
     if (!cmd.vars?.has(word)) return word;
     const text = word.replace(TEMP_DEFAULT, "$TMPDIR").replace(REFERENCE, (ref, braced, bare) => {
@@ -98,11 +99,23 @@ function substitute(
       if (name === undefined) return written === "PWD" ? "." : ref;
       return value(name) ?? ref;
     });
-    if (text.includes("$")) vars.add(text);
+    if (text.includes("$") || text.includes("`")) vars.add(text);
+    if (cmd.quoted?.has(word)) quoted.add(text);
     return text;
   };
-  return { ...cmd, words: cmd.words.map(fill), writes: cmd.writes.map(fill), vars };
+  // An unquoted `$x` alone is split into words: `x='rm -rf /other'; $x`, `o='-rf /other'; rm $o`.
+  const split = (word: string): string[] => {
+    const text = fill(word);
+    const whole = text !== word && WHOLE.test(word) && !cmd.quoted?.has(word);
+    return whole && /\s/.test(text.trim()) ? text.trim().split(/\s+/) : [text];
+  };
+  const words = cmd.words.flatMap(split);
+  const out = { ...cmd, words, writes: cmd.writes.map(fill), vars, quoted };
+  return cmd.input ? { ...out, input: cmd.input.map(fill) } : out;
 }
+
+/** A word that is one variable and nothing else. */
+const WHOLE = /^\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)$/;
 
 /** Note what `cmd` assigns, or sets some other way, in `table`. */
 function assign(cmd: SimpleCommand, table: Table): void {
@@ -148,6 +161,9 @@ function assigned(
   given: string[],
 ): string[] | null {
   if (isPlain(cmd, word)) return [value];
+  // `d=$(pwd)/dist`: a path from where the shell is.
+  const here = value.replace(/\$\(pwd\)|`pwd`/g, ".");
+  if (here !== value && !holdsVariable(here) && !holdsSubstitution(here)) return [here];
   // `tmp=$(mktemp -d)`: a new folder in temp. `here=$(pwd)`: where the shell is.
   const [inner] = cmd.nested;
   const ran = inner?.length === 1 ? unwrap((inner[0] as SimpleCommand).words).tokens : [];
@@ -230,12 +246,23 @@ const withoutKnown = (text: string): string =>
 export const holdsVariable = (text: string): boolean => VARIABLE.test(withoutKnown(text));
 
 /**
- * True when `target`, a path `cmd` writes or deletes, still holds a variable or a parameter the
- * shell fills in when the command runs: where it points is only known then.
+ * Substitutions whose output stays where the path already points: the folder the shell is in, the
+ * repository's top folder, a new temp file, or a part of a name (`log-$(date +%F).txt`).
+ */
+const KNOWN_OUTPUT =
+  /\$\((?:pwd|Get-Location|git rev-parse --show-toplevel|mktemp(?: -d)?(?: [\w.-]*X{3,}[\w.-]*)?|date(?: [^()`$]*)?|basename [^()`$]*|\$(?:PWD(?:\.Path)?|env:TE?MP|(?:_|PSItem)(?:\.\w+)*))\)|`pwd`/gi;
+
+/** True when `text` holds a substitution whose output isn't known: `$(cat list)`, backticks. */
+export const holdsSubstitution = (text: string): boolean =>
+  /\$\(|`/.test(text.replace(KNOWN_OUTPUT, ""));
+
+/**
+ * True when `target`, a path `cmd` writes or deletes, still holds a variable, a parameter or a
+ * substitution the shell fills in when the command runs: where it points is only known then.
  */
 export function unresolvedTarget(cmd: SimpleCommand, target: string, ctx: PathContext): boolean {
   if (isWin(ctx) && CMD_VARIABLE.test(withoutKnown(target))) return true;
-  if (!holdsVariable(target) || !cmd.vars) return false;
+  if ((!holdsVariable(target) && !holdsSubstitution(target)) || !cmd.vars) return false;
   for (const word of cmd.vars) if (word.includes(target) || target.includes(word)) return true;
   return false;
 }

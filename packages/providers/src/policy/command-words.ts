@@ -12,6 +12,9 @@ export const FUNCTION_NAME = /^[A-Za-z_][\w-]*$/;
 /** A `case` pattern before its commands: `*.txt)`, with no `(` of its own. */
 const CASE_PATTERN = /^[^()]+\)$/;
 
+/** PowerShell's parameter list at the start of a block: `param($p)`, or `param` before `($p)`. */
+const PARAM = /^param(?:\(.*\))?$/s;
+
 /** A shell variable assignment (`NAME=value`). */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
@@ -75,6 +78,9 @@ export function unwrap(words: string[]): Unwrapped {
       rest = rest.slice(1);
     } else if (head === "@") {
       rest = rest.slice(1);
+    } else if (head && PARAM.test(head) && rest.length > 1) {
+      // PowerShell's `param($p)` before a block's commands, or `param ($p)`.
+      rest = rest.slice(head === "param" ? 2 : 1);
     } else if (head && ECHO_OFF.test(head)) {
       rest = [(rest[0] as string).slice(1), ...rest.slice(1)];
     } else break;
@@ -84,12 +90,13 @@ export function unwrap(words: string[]): Unwrapped {
 
 /**
  * True when the next word after `words` names the program the command runs: nothing but wrappers,
- * assignments and keywords came before it (`sudo -u root`, `timeout 9`, `X=1`), or `xargs`.
+ * assignments and keywords came before it (`sudo -u root`, `timeout 9`, `X=1`, `env`), or `xargs`.
  */
 export function atCommandWord(words: string[]): boolean {
   const { tokens } = unwrap(words);
   if (tokens.length === 0) return true;
   const bin = binName(tokens[0]);
+  if (bin === "env") return envCommand(tokens.slice(1), []).length === 0;
   return bin === "xargs" || wrappedCommand(bin, tokens.slice(1), [])?.length === 0;
 }
 

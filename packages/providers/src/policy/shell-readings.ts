@@ -2,6 +2,7 @@ import { isWin, type PathContext } from "./paths";
 import { parseShell, type ShellDialect, type SimpleCommand } from "./shell";
 import type { Scope } from "./shell-builder";
 import type { EscapeMode } from "./shell-escapes";
+import { groupInputs } from "./stdin-scripts";
 import { resolveVariables } from "./variables";
 
 /**
@@ -26,7 +27,7 @@ export function shellReadings(
   scope?: Scope,
 ): SimpleCommand[][] {
   return escapeModes(src, dialect, isWin(ctx)).map((mode) =>
-    resolveVariables(parseShell(src, dialect, mode), new Map(scope)),
+    resolveVariables(groupInputs(parseShell(src, dialect, mode)), new Map(scope)),
   );
 }
 

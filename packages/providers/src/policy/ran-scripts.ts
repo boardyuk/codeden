@@ -35,7 +35,7 @@ export function scriptsOf(
     ...toolScripts(cmd, bin, args, ctx, feed),
   ];
   // What the shell itself runs, or reads from a heredoc it filled in, sees the shell's variables.
-  const fed = stdinScripts(cmd, bin, args, feed);
+  const fed = stdinScripts(cmd, bin, args, feed, ctx.stdin);
   const inShell = SAME_SHELL.has(bin) ? scripts : [];
   const scoped = [...inShell, ...fed].map((script) => ({ ...script, scope: cmd.scope }));
   return [...(SAME_SHELL.has(bin) ? [] : scripts), ...scoped];
@@ -81,10 +81,10 @@ export interface RanCode {
  * The code of an interpreter's one-liner (`python -c "…"`) and what it reads on its input
  * (`python - <<EOF`, `echo '…' | node`).
  */
-export function codeOf(cmd: SimpleCommand, feed: Feed): RanCode {
+export function codeOf(cmd: SimpleCommand, feed: Feed, ctx: RiskContext): RanCode {
   const { tokens } = unwrap(cmd.words);
   const bin = binName(tokens[0]);
-  const input = stdinCode(cmd, bin, feed);
+  const input = stdinCode(cmd, bin, feed, ctx.stdin);
   const code = inlineCode(bin, tokens.slice(1));
   return { code: input?.text ? [...code, input.text] : code, unknown: input?.dynamic === true };
 }
@@ -102,7 +102,7 @@ export function codeScripts(
 ): InlineScript[] {
   if (depth >= MAX_DEPTH) return [];
   const dialect = isWin(ctx) ? "auto" : "posix";
-  return codeOf(cmd, feed)
+  return codeOf(cmd, feed, ctx)
     .code.flatMap(inlineCodeCommands)
     .map((text) => ({ text, dialect }));
 }

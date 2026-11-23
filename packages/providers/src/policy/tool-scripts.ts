@@ -1,4 +1,4 @@
-import { binName } from "./command-words";
+import { binName, unwrap } from "./command-words";
 import { type DeleteContext, listedPaths } from "./deletes";
 import type { InlineScript } from "./inline-scripts";
 import { readFd, readFind, xargsCommand } from "./search-runs";
@@ -35,9 +35,15 @@ const expands = (cmd: SimpleCommand, word: string): boolean =>
 
 /** Git's global options that take the next word. */
 const GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
-/** A setting given with `-c` whose value git runs: `alias.x=!cmd`, any `!cmd`, a pager or editor. */
+/**
+ * A setting given with `-c` whose value git runs: `alias.x=!cmd`, any `!cmd`, a pager or editor,
+ * a filter, a merge or diff tool, a helper.
+ */
 const GIT_RUNS =
-  /^(?:[\w.-]+=!|(?:core\.(?:pager|editor|sshcommand|fsmonitor)|sequence\.editor|diff\.external|pager\.[\w-]+)=)(.+)$/is;
+  /^(?:[\w.-]+=!|(?:core\.(?:pager|editor|sshcommand|fsmonitor|gitproxy|askpass)|sequence\.editor|diff\.external|pager\.[\w-]+|filter\.[\w.-]+\.(?:clean|smudge|process)|(?:merge|diff)tool\.[\w.-]+\.cmd|diff\.[\w.-]+\.(?:command|textconv)|merge\.[\w.-]+\.driver|credential\.(?:[^=]*\.)?helper|gpg\.(?:\w+\.)?program|uploadpack\.packobjectshook)=)(.+)$/is;
+/** A variable set for one git command whose value git runs. */
+const GIT_ENV =
+  /^GIT_(?:EDITOR|SEQUENCE_EDITOR|PAGER|SSH_COMMAND|EXTERNAL_DIFF|ASKPASS|PROXY_COMMAND)=(.+)$/s;
 /** Options whose value git runs as a command line, by subcommand. */
 const GIT_EXEC: Record<string, RegExp> = {
   rebase: /^(?:-x|--exec)$/,
@@ -47,12 +53,18 @@ const GIT_EXEC: Record<string, RegExp> = {
 
 function gitScripts(cmd: SimpleCommand, args: string[]): InlineScript[] {
   const out: InlineScript[] = [];
+  for (const assign of unwrap(cmd.words).assigns) {
+    const value = GIT_ENV.exec(assign)?.[1];
+    if (value) out.push(line(value, expands(cmd, assign)));
+  }
   let i = 0;
   for (; i < args.length && args[i]?.startsWith("-"); i += 1) {
     const option = args[i] as string;
-    if (!GIT_VALUED.has(option)) continue;
-    i += 1;
-    const setting = option === "-c" ? GIT_RUNS.exec(args[i] ?? "") : null;
+    // `-c name=value`, or written together: `-cname=value`.
+    const attached = /^-c(.+)$/s.exec(option)?.[1];
+    if (!GIT_VALUED.has(option) && attached === undefined) continue;
+    if (attached === undefined) i += 1;
+    const setting = option.startsWith("-c") ? GIT_RUNS.exec(attached ?? args[i] ?? "") : null;
     if (setting) out.push(line(setting[1] as string, expands(cmd, args[i] as string)));
   }
   const sub = args[i]?.toLowerCase() ?? "";
@@ -61,7 +73,14 @@ function gitScripts(cmd: SimpleCommand, args: string[]): InlineScript[] {
   for (const [k, arg] of rest.entries()) {
     if (!exec) break;
     const [name = "", ...value] = arg.split("=");
-    const given = exec.test(arg) ? rest[k + 1] : exec.test(name) ? value.join("=") : undefined;
+    // `-x cmd`, `--exec=cmd`, and git's short forms `-ix cmd` and `-xcmd`.
+    const short = sub === "rebase" ? /^-[a-wyz]*x(.*)$/s.exec(arg) : null;
+    const given =
+      exec.test(arg) || short?.[1] === ""
+        ? rest[k + 1]
+        : exec.test(name)
+          ? value.join("=")
+          : short?.[1];
     if (given) out.push(line(given, expands(cmd, given)));
   }
   if (sub === "bisect" && rest[0] === "run" && rest.length > 1) out.push(ran(cmd, rest.slice(1)));
@@ -120,7 +139,8 @@ function placed(
   if (!words.some((w) => w.includes("{}"))) {
     return [ran(cmd, append ? [...words, ...places] : words)];
   }
-  return places.map((place) =>
+  // With nothing known to run it on, it is judged as written.
+  return (places.length > 0 ? places : ["{}"]).map((place) =>
     ran(
       cmd,
       words.map((w) => w.split("{}").join(place)),
@@ -163,7 +183,8 @@ function runnerScripts(cmd: SimpleCommand, bin: string, args: string[]): InlineS
   for (const [k, word] of rest.entries()) {
     if (word.startsWith("-") || tried >= 3) continue;
     tried += 1;
-    out.push(ran(cmd, rest.slice(k)));
+    // `npx rimraf@5 x` runs `rimraf`.
+    out.push(ran(cmd, [word.replace(/(?<=.)@[^/]*$/, ""), ...rest.slice(k + 1)]));
   }
   return out;
 }
