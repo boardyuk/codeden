@@ -16,7 +16,7 @@ import {
 import { executableFingerprint, ModelFreshness } from "../freshness";
 import { ModelCatalog } from "../models";
 import type { ResolvedCommand } from "../util/exec";
-import { ensureLocated, quickLocate } from "../util/locate";
+import { ensureLocated, type LocateOptions, quickLocate } from "../util/locate";
 import { DEFAULT_MODEL_ID } from "../util/model";
 import type { UtilityModel } from "../utility";
 import { CODEX_MIN_VERSION, detectCodex } from "./detect";
@@ -79,6 +79,8 @@ function fallbackModels(note?: string): ModelInfo[] {
 
 export interface CodexAdapterOptions {
   executable?: ResolvedCommand;
+  /** Where to look for `codex` (tests); default PATH, then its known install locations. */
+  locate?: LocateOptions;
   /** Max time for model discovery, app-server start-up included. */
   modelListTimeoutMs?: number;
 }
@@ -102,20 +104,30 @@ export class CodexAdapter implements ProviderAdapter {
    * found broken are skipped until they change.
    */
   private executable(): ResolvedCommand | undefined {
-    return this.options.executable ?? quickLocate("codex");
+    return this.options.executable ?? quickLocate("codex", this.options.locate);
   }
 
   /**
    * Before a runner's first session or model list: check the copies once (`ensureLocated`),
-   * so `executable()` skips an old or broken one although no detection has run yet.
+   * so `executable()` skips an old or broken one although no detection has run yet. Not when
+   * the adapter was given an executable or its own `locate` options: the process-wide look-up
+   * searches PATH and the known locations, which those exist to replace.
    */
   private async located(): Promise<void> {
-    if (!this.options.executable) await ensureLocated("codex", CODEX_MIN_VERSION);
+    if (!this.options.executable && !this.options.locate) {
+      await ensureLocated("codex", CODEX_MIN_VERSION);
+    }
   }
 
   /** Finds a working copy (validating each one), so a broken shim never wins. */
   detect(): Promise<ProviderStatus> {
-    return detectCodex(this.options.executable ? { executable: this.options.executable } : {});
+    return detectCodex(
+      this.options.executable
+        ? { executable: this.options.executable }
+        : this.options.locate
+          ? { locate: this.options.locate }
+          : {},
+    );
   }
 
   capabilities(): ProviderCapabilities {
