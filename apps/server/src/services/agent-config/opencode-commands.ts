@@ -17,14 +17,20 @@ const MAX_SKILL_DEPTH = 6;
 /** Folder entries OpenCode skips when scanning for skills. */
 const skipped = (name: string) => name.startsWith(".") || name === "node_modules";
 
-/** A directory entry's type, following symlinks (skill folders are often linked in). */
-function kindOf(dir: string, entry: Dirent): "file" | "dir" | undefined {
+type EntryKind = "file" | "dir" | "linked-dir" | undefined;
+
+/**
+ * A directory entry's type. Skill folders are often linked in, so a link to a folder is
+ * `linked-dir`: it counts as a skill when it holds a `SKILL.md` and is never walked, so a link
+ * to a large or private folder (or a link loop) isn't scanned.
+ */
+function kindOf(dir: string, entry: Dirent): EntryKind {
   if (entry.isFile()) return "file";
   if (entry.isDirectory()) return "dir";
   if (!entry.isSymbolicLink()) return undefined;
   try {
     const stat = statSync(join(dir, entry.name));
-    return stat.isFile() ? "file" : stat.isDirectory() ? "dir" : undefined;
+    return stat.isFile() ? "file" : stat.isDirectory() ? "linked-dir" : undefined;
   } catch {
     return undefined;
   }
@@ -39,13 +45,14 @@ function skillEntry(file: string, id: string): SlashCommand[] {
 /**
  * The skills in one skills folder, as OpenCode scans it: each folder holding a `SKILL.md` (up
  * to 6 deep, not looking further inside it) and `*.md` files at the top. A skill is named by
- * its folder (or file), which is the id OpenCode loads it by.
+ * its folder (or file), which is the id OpenCode loads it by. A linked folder counts only as a
+ * skill itself (its own `SKILL.md`); nothing behind a link is walked. Only front matter is read.
  */
 export function openCodeSkillsIn(root: string): SlashCommand[] {
   const out: SlashCommand[] = [];
-  const queue = [{ dir: root, depth: 0 }];
-  for (const { dir, depth } of queue) {
-    let entries: { name: string; kind: "file" | "dir" | undefined }[];
+  const queue: { dir: string; depth: number; linked?: boolean }[] = [{ dir: root, depth: 0 }];
+  for (const { dir, depth, linked } of queue) {
+    let entries: { name: string; kind: EntryKind }[];
     try {
       entries = readdirSync(dir, { withFileTypes: true })
         .filter((e) => !skipped(e.name))
@@ -57,11 +64,12 @@ export function openCodeSkillsIn(root: string): SlashCommand[] {
       out.push(...skillEntry(join(dir, "SKILL.md"), basename(dir)));
       continue;
     }
+    if (linked) continue;
     for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       if (depth === 0 && e.kind === "file" && e.name.endsWith(".md")) {
         out.push(...skillEntry(join(dir, e.name), e.name.slice(0, -3)));
-      } else if (e.kind === "dir" && depth < MAX_SKILL_DEPTH) {
-        queue.push({ dir: join(dir, e.name), depth: depth + 1 });
+      } else if ((e.kind === "dir" || e.kind === "linked-dir") && depth < MAX_SKILL_DEPTH) {
+        queue.push({ dir: join(dir, e.name), depth: depth + 1, linked: e.kind === "linked-dir" });
       }
     }
   }

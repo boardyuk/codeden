@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type ProviderCommand, SlashCommandList } from "@codeden/contracts";
@@ -144,6 +144,20 @@ describe("OpenCode's `/` commands and skills from its files", () => {
     // What the session runs for a name decides its kind, over what a file says.
     reported = [{ name: "pdf", description: "", kind: "command" }];
     expect(list()).toEqual([{ name: "pdf", description: "Read PDFs", kind: "command", ...oc }]);
+  });
+
+  it("takes a linked skill folder as a skill, and never walks through a link", () => {
+    const elsewhere = join(dir, "elsewhere");
+    put(join(elsewhere, "linked", "SKILL.md"), skill("Linked in"));
+    // A link to a broad folder: whatever skills sit inside it are not scanned.
+    put(join(elsewhere, "broad", "deep", "hidden-away", "SKILL.md"), skill("Behind a link"));
+    mkdirSync(join(home, ".claude", "skills"), { recursive: true });
+    // Junctions need no special rights on Windows; elsewhere the type is ignored.
+    symlinkSync(join(elsewhere, "linked"), join(home, ".claude", "skills", "linked"), "junction");
+    symlinkSync(join(elsewhere, "broad"), join(home, ".claude", "skills", "broad"), "junction");
+    symlinkSync(home, join(home, ".claude", "skills", "loop"), "junction");
+
+    expect(draft()).toEqual([{ name: "linked", description: "Linked in", kind: "skill", ...oc }]);
   });
 
   it("has no skill switches for OpenCode: What's loaded lists no OpenCode skills", () => {
