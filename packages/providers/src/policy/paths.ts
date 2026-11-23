@@ -121,12 +121,13 @@ const CODEDEN_HOME_VARS = [
 
 /**
  * Git Bash paths on Windows: `/c/Users/x` is `C:\Users\x`, and `/tmp` is the user's temp
- * directory.
+ * directory. WSL's mounts of the same drives (`/mnt/c/Users/x`, as `wsl` hands a Linux command
+ * its paths) are read the same way.
  */
 function fromGitBash(value: string, temp: string | undefined): string {
   if (temp && /^\/tmp(?=$|\/)/.test(value)) return temp + value.slice(4);
-  const drive = /^\/([a-z])(?=$|\/)/i.exec(value);
-  if (drive?.[1]) return `${drive[1].toUpperCase()}:\\${value.slice(3)}`;
+  const drive = /^(?:\/mnt)?\/([a-z])(?=$|\/)/i.exec(value);
+  if (drive?.[1]) return `${drive[1].toUpperCase()}:\\${value.slice(drive[0].length + 1)}`;
   return value;
 }
 

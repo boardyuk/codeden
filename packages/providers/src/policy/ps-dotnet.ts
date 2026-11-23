@@ -6,7 +6,8 @@ import { holdsVariable } from "./variables";
  * `[IO.File]::Delete('x')`, `[IO.Directory]::Delete('x', $true)`, `[IO.File]::WriteAllText(…)`,
  * `::Move`, `::Copy` and their kin, also written `[System.IO.File]`. The risk classifier judges
  * each path they are given as a write, and a file one reads (`ReadAllText`, the source of a `Copy`)
- * as a read, so a secrets file asks. Other types (`[IO.Path]::Combine`) are left alone.
+ * as a read, so a secrets file asks. A string the other `System.IO` types are handed
+ * (`[IO.StreamReader]::new('x')`, `[IO.FileStream]::new('x', 'Open')`) counts as a read too.
  */
 
 /** What the .NET calls in a command change. */
@@ -23,6 +24,8 @@ export interface DotnetWrites {
 
 /** A static call on `File` or `Directory`: the method, then its arguments up to the `)`. */
 const CALL = /\[\s*(?:System\.)?IO\.(?:File|Directory)\s*\]\s*::\s*(\w+)\s*\(/gi;
+/** A static call or constructor on another `System.IO` type (`[IO.StreamReader]::new(`). */
+const OTHER_CALL = /\[\s*(?:System\.)?IO\.(?!(?:File|Directory)\s*\])\w+\s*\]\s*::\s*\w+\s*\(/gi;
 /** Methods that change the path they are given first. */
 const CHANGES = /^(?:Delete|Write\w*|Append\w*|Create\w*|Open|OpenWrite|Encrypt|Decrypt|Set\w+)$/i;
 
@@ -80,6 +83,12 @@ export function dotnetWrites(cmd: SimpleCommand): DotnetWrites {
         else if (built || arg === "" || (quoted?.[1] !== "'" && holdsVariable(arg)))
           found.unknown = true;
         else found.targets.push(quoted ? (quoted[2] as string) : arg);
+      }
+    }
+    for (const call of word.matchAll(OTHER_CALL)) {
+      for (const arg of argumentsAt(word, call.index + call[0].length)) {
+        const text = /^(['"])(.*)\1$/s.exec(arg)?.[2];
+        if (text) found.reads.push(text);
       }
     }
   }

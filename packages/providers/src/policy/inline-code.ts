@@ -9,11 +9,15 @@
  * When it runs a command (`os.system`, `subprocess.run`, `execSync`, `system`), its string
  * literals are also read as command lines, and judged like the script of `bash -c`.
  *
+ * Every string literal that may be a path, absolute or relative, is also judged as a read of that
+ * file (`inlineCodePaths`), the way `cat` reading it is: `open('~/.ssh/id_rsa').read()` asks like
+ * `cat ~/.ssh/id_rsa`, and a path in CodeDen's home asks at every level.
+ *
  * This is a heuristic over the text, not a reading of the code. It doesn't follow a path or a
  * command built at run time (joined from parts, read from a variable, the environment or a file),
- * or a script in a file or on standard input (`python - <<EOF`). And it can't tell which literal
- * the writing call uses, so a one-liner that reads one absolute path and writes somewhere else
- * asks too.
+ * or a script in a file. A script on standard input (`python - <<EOF`, `echo '…' | node`) is read
+ * when it is written out (`./stdin-scripts`). And it can't tell which literal the writing call
+ * uses, so a one-liner that reads one absolute path and writes somewhere else asks too.
  */
 
 /** Interpreters and the options their code follows. */
@@ -101,6 +105,31 @@ export function inlineCodeWrites(code: string): string[] {
 
 /** A string literal's text, without the escapes of its quotes and separators. */
 const unquoted = (body: string): string => body.replace(/\\([\\/"'])/g, "$1");
+
+/**
+ * Calls that only test or print text and are handed nothing but literals (`print('/x')`,
+ * `f.endswith('.pem')`, `console.log('/x')`): their strings are left out of the paths a one-liner
+ * reads. A call handed another call (`print(open('/x').read())`) stays.
+ */
+const TEST_OR_PRINT =
+  /(?:\.(?:startsWith|endsWith|startswith|endswith|includes|indexOf)|\b(?:print|puts|console\.\w+))\s*\([^()]*\)/g;
+/** Not a file: a URL, or text with a line break, a pipe or a quote in it. */
+const NOT_A_FILE = /^[a-z][\w+.-]*:\/\/|[\n\r|"<>]/i;
+
+/**
+ * The files `code` may read: each string literal that may be a path, absolute or relative, its
+ * open mode taken off (perl's `open(F, '</x')`). The risk classifier judges each like a file `cat`
+ * reads (`classifyRead`), so a literal naming a secrets file or CodeDen's home asks however the
+ * code opens it (`open`, `readFileSync`, `File.read`, `file_get_contents`).
+ */
+export function inlineCodePaths(code: string): string[] {
+  const out: string[] = [];
+  for (const text of literals(code.replace(TEST_OR_PRINT, ""))) {
+    const path = text.replace(/^\+?(?:<|>>?)\s*/, "").trim();
+    if (path && !NOT_A_FILE.test(path)) out.push(path);
+  }
+  return out;
+}
 
 /** The text of each string literal in `code`, in order. */
 const literals = (code: string): string[] =>

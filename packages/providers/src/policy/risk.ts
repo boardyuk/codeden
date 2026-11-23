@@ -9,8 +9,9 @@ import { classifyDelete, listedPaths } from "./deletes";
 import { downloadWrites } from "./downloads";
 import { dumpsEnvironment } from "./env-dumps";
 import { type ListOutput, namesOnly } from "./env-names";
+import { feedOf, firstInList, TOO_MANY_LOCATIONS, withKept } from "./first-in-list";
 import { classifyGit } from "./git";
-import { inlineCodeWrites } from "./inline-code";
+import { inlineCodePaths, inlineCodeWrites } from "./inline-code";
 import { inlineScripts } from "./inline-scripts";
 import { classifyInstall } from "./installs";
 import { itemWrites } from "./item-writes";
@@ -18,7 +19,6 @@ import { MAX_LOCATIONS, moveTo } from "./locations";
 import { isInside, isSecretPath, resolveAgainst } from "./paths";
 import { projectConfigCommand } from "./project-config";
 import { providerLoginCommand } from "./provider-logins";
-import { keptWords } from "./ps-assignments";
 import { dotnetWrites } from "./ps-dotnet";
 import {
   codeOf,
@@ -33,6 +33,7 @@ import { programDenial } from "./read-only";
 import { registryChange, registryExports } from "./registry";
 import { pipesDownloadIntoInterpreter } from "./remote-scripts";
 import { codedenFolderRisk, folderRisk } from "./run-folder";
+import { crontabChange } from "./schedules";
 import { secretArgument, toolOutputs } from "./secrets";
 import type { SimpleCommand } from "./shell";
 import { shellReadings } from "./shell-readings";
@@ -101,86 +102,11 @@ export function classifyCommand(command: string, given: RiskContext): RiskAssess
   return mostSevere(found);
 }
 
-/**
- * One simple command's verdict for `firstInList`. `feeds`: its output is used by another
- * command (it sits in a substitution or a pipe).
- */
-type CommandCheck = (
-  cmd: SimpleCommand,
-  ctx: RiskContext,
-  feeds: boolean,
-) => RiskAssessment | undefined;
-
-/**
- * The first verdict `check` gives anywhere in `list`: substitutions, subshells, blocks, called
- * functions (`./blocks`) and inline scripts (`bash -c "…"`) included, following `cd` like
- * `classifyList`.
- */
-function firstInList(
-  list: SimpleCommand[],
-  given: RiskContext,
-  depth: number,
-  check: CommandCheck,
-  feeds = false,
-): RiskAssessment | undefined {
-  let heres = [withFunctions(list, given)];
-  let head = 0;
-  for (const [i, cmd] of list.entries()) {
-    if (!cmd.piped) head = i;
-    const piped = list[i + 1]?.piped === true;
-    const feed = feedOf(list, i, head);
-    for (const here of heres) {
-      const inside = within(here, cmd, feed);
-      for (const nested of cmd.nested) {
-        const found = firstInList(nested, inside, depth, check, true);
-        if (found) return found;
-      }
-      for (const ran of ranLists(cmd, inside)) {
-        const found = firstInList(ran.list, ran.ctx, depth, check, feeds || piped);
-        if (found) return found;
-      }
-      const scripts = [
-        ...scriptsOf(cmd, here, depth, feed),
-        ...codeScripts(cmd, here, depth, feed),
-      ];
-      for (const script of scripts) {
-        const into = feeds || piped || script.feeds === true;
-        const there = scriptContext(script, cmd, inside);
-        for (const inner of readings(script, there)) {
-          const found = firstInList(inner, there, depth + 1, check, into);
-          if (found) return found;
-        }
-      }
-      for (const one of withKept(cmd)) {
-        const found = check(one, here, feeds || piped);
-        if (found) return found;
-      }
-    }
-    heres = locationsThrough(cmd, heres);
-    // A location past the limit isn't checked, so it may be CodeDen's home: every level asks.
-    if (heres.length > MAX_LOCATIONS) return TOO_MANY_LOCATIONS;
-  }
-  return undefined;
-}
-
-/** The pipe the command at `i` reads: the command at its `head`, and whether others sit between. */
-function feedOf(list: SimpleCommand[], i: number, head: number): Feed {
-  return list[i]?.piped ? { source: list[head], filtered: i - 1 !== head } : {};
-}
-
 /** A script nested deeper than is followed (`MAX_DEPTH`): what it runs isn't read. */
 const TOO_DEEP: RiskAssessment = {
   risky: true,
   action: "outside_worktree",
   reason: "Runs a command nested too deep to read",
-  always: true,
-};
-
-/** A command line that may leave the shell in more folders than are followed (`./locations`). */
-const TOO_MANY_LOCATIONS: RiskAssessment = {
-  risky: true,
-  action: "outside_worktree",
-  reason: "Changes folders in more ways than can be followed",
   always: true,
 };
 
@@ -228,12 +154,6 @@ function classifyList(
     if (heres.length > MAX_LOCATIONS) return mostSevere([...found, TOO_MANY_LOCATIONS]);
   }
   return mostSevere(found);
-}
-
-/** `cmd`, then what a PowerShell assignment in it keeps in its variable (`keptWords`). */
-function withKept(cmd: SimpleCommand): SimpleCommand[] {
-  const kept = keptWords(cmd);
-  return kept ? [cmd, kept] : [cmd];
 }
 
 /**
@@ -312,7 +232,9 @@ function classifyActions(
   for (const script of codeScripts(cmd, ctx, depth, at)) {
     for (const list of shellReadings(script.text, script.dialect, ctx)) {
       const guess = classifyList(list, ctx, depth + 1, "feeds");
-      if (guess.risky && guess.action === "outside_worktree") ran.push(guess);
+      if (guess.risky && (guess.action === "outside_worktree" || guess.action === "secrets")) {
+        ran.push(guess);
+      }
     }
   }
   const code = codeOf(cmd, at, ctx);
@@ -353,6 +275,7 @@ function classifyActions(
   found.push(classifyDelete(cmd, ctx, at.source));
   const registry = registryChange(bin, args, tokens);
   if (registry) found.push(registry);
+  found.push(crontabChange(bin, args) ?? SAFE);
 
   const copies = copyWrites(bin, args, ctx);
   const outputs = [...toolOutputs(bin, args), ...registryExports(bin, args)];
@@ -373,12 +296,14 @@ function classifyActions(
   for (const target of [...dotnet.targets, ...handed]) found.push(classifyWrite(target, ctx));
   if (dotnet.unknown) found.push(risky("outside_worktree", `Writes ${UNRESOLVED}`));
   for (const item of dotnet.reads) found.push(classifyRead(item, ctx));
-  // A one-liner's code: the rooted paths it names, when it writes or deletes (`./inline-code`).
+  // A one-liner's code (`./inline-code`): the rooted paths it names, when it writes or deletes, and
+  // every path it names, read as `cat` would read it.
   for (const text of code.code) {
     for (const target of inlineCodeWrites(text)) {
       const write = classifyWrite(target, here);
       if (write.risky && write.action !== "file_change") found.push(write);
     }
+    for (const item of inlineCodePaths(text)) found.push(classifyRead(item, here));
   }
 
   // A file PowerShell's variable syntax reads (`${C:\Users\me\.ssh\id_rsa}`), whatever the command.

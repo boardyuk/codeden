@@ -46,6 +46,7 @@ const DELETES = new Set([
   "unlink",
   "shred",
   "rimraf",
+  "del-cli",
 ]);
 /** cmd's own commands, and the switches each takes. */
 const CMD_SWITCHES = new Map<string, RegExp>([

@@ -4,11 +4,14 @@ import type { ShellDialect } from "./shell";
 
 /**
  * Where a copy, move or file-writing command writes (§11.2): `cp`, `mv`, cmd's `copy`, `move`,
- * `xcopy` and `robocopy`, PowerShell's `Copy-Item` and `Move-Item`, and `tee`, `Set-Content`,
- * `Out-File` and `Add-Content`.
+ * `xcopy` and `robocopy`, PowerShell's `Copy-Item` and `Move-Item`, the `cpy` and `cpx` packages,
+ * and `tee`, `Set-Content`, `Out-File` and `Add-Content`.
  */
 
-const COPIES = ["cp", "mv", "copy", "move", "copy-item", "move-item", "xcopy", "robocopy"];
+const COPIES = [
+  ...["cp", "mv", "copy", "move", "copy-item", "move-item", "xcopy", "robocopy"],
+  ...["cpy", "cpx"],
+];
 const WRITERS = ["tee", "set-content", "out-file", "add-content"];
 /** The context of a copy: the paths, and the shell the command runs in when it is known. */
 type CopyContext = PathContext & { shell?: ShellDialect };

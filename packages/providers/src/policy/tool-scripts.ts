@@ -9,9 +9,10 @@ import type { Feed } from "./stdin-scripts";
  * Commands that a tool runs for the command line (§11.2), beside the shells' own inline scripts
  * (`./inline-scripts`): git (`rebase --exec`, `bisect run`, `submodule foreach`, an alias or
  * another setting given with `-c` that names a command), `awk`'s `system()` and pipes, `trap`,
- * `alias`, what `find -exec`, `fd -x` and `xargs` run on what they are given, the tool a package
- * runner starts (`npx rimraf x`, `pnpm exec`, `uv run`) and a PowerShell script block made from a
- * string. Each is judged like a command line of its own.
+ * `alias`, what `find -exec`, `fd -x`, `xargs` and GNU `parallel` run on what they are given, the
+ * tool a package runner starts (`npx rimraf x`, `pnpm exec`, `uv run`, and a file tool a package
+ * manager runs by name: `pnpm rimraf x`, `yarn run cpy a b`), what `dotenv` runs, and a PowerShell
+ * script block made from a string. Each is judged like a command line of its own.
  */
 
 /** More folders or piped paths than this are not each tried in a command run on them. */
@@ -189,6 +190,118 @@ function runnerScripts(cmd: SimpleCommand, bin: string, args: string[]): InlineS
   return out;
 }
 
+/** Tools that delete or write the files they are given, which a package manager runs by name. */
+const FILE_TOOLS = new Set(["rimraf", "del", "del-cli", "cpy", "cpx", "shx"]);
+
+/**
+ * Package managers that run a script, or else a package's tool, by name: bare (`pnpm rimraf x`,
+ * `yarn rimraf x`, `bun rimraf x`) or with `run` (`npm run` only then), and their options that take
+ * a value.
+ */
+const BY_NAME: Record<string, { bare: boolean; valued: readonly string[] }> = {
+  pnpm: { bare: true, valued: ["--filter", "-F", "-C", "--dir"] },
+  yarn: { bare: true, valued: ["--cwd"] },
+  bun: { bare: true, valued: ["--cwd", "--filter", "-F"] },
+  npm: { bare: false, valued: ["--prefix", "-w", "--workspace"] },
+};
+
+/**
+ * The tool a package manager runs by name, with its arguments, when it is one that deletes or
+ * writes files (`FILE_TOOLS`). Any other name (`pnpm build`) runs a script of the project's
+ * manifest, or a command of the manager itself, so it is left alone.
+ */
+function byName(cmd: SimpleCommand, bin: string, args: string[]): InlineScript[] {
+  const spec = BY_NAME[bin];
+  if (!spec) return [];
+  let run = false;
+  let i = 0;
+  for (; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg.startsWith("-")) {
+      if (spec.valued.includes(arg)) i += 1;
+    } else if (!run && (arg === "run" || arg === "run-script")) run = true;
+    // `yarn workspace <name> <command>`.
+    else if (!run && bin === "yarn" && arg === "workspace") i += 1;
+    else break;
+  }
+  const tool = args[i]?.toLowerCase();
+  if ((!run && !spec.bare) || tool === undefined || !FILE_TOOLS.has(tool)) return [];
+  return [ran(cmd, [tool, ...args.slice(i + 1)])];
+}
+
+/** dotenv's options that take a value: a file, a variable, a cascade, a variable to print. */
+const DOTENV_VALUED = new Set(["-e", "-v", "-c", "-p", "-f", "--file"]);
+
+/**
+ * What `dotenv` runs with the variables of the files it reads: `dotenv -e .env -- cmd`
+ * (dotenv-cli), `dotenv -f .env run cmd` (python-dotenv). Its own words stay with it, so the files
+ * it reads still count as read.
+ */
+function dotenvScripts(cmd: SimpleCommand, args: string[]): InlineScript[] {
+  let i = 0;
+  for (let sub = false; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--") {
+      i += 1;
+      break;
+    }
+    if (!sub && arg === "run") sub = true;
+    else if (!arg.startsWith("-")) break;
+    else if (DOTENV_VALUED.has(arg)) i += 1;
+  }
+  return i < args.length ? [ran(cmd, args.slice(i))] : [];
+}
+
+/** GNU parallel's options that take the next word as their value. */
+const PARALLEL_VALUED = new Set([
+  ...["-j", "-P", "-S", "-a", "-d", "-E", "-I", "-C", "-n", "-N", "-L", "-l", "-s", "-J"],
+  ...["--jobs", "--max-procs", "--sshlogin", "--arg-file", "--delimiter", "--eof", "--colsep"],
+  ...["--joblog", "--results", "--res", "--tmpdir", "--workdir", "--wd", "--max-args"],
+  ...["--max-lines", "--max-chars", "--timeout", "--delay", "--memfree", "--load", "--env"],
+  ...["--basefile", "--bf", "--return", "--halt", "--retries", "--tagstring", "--block"],
+  ...["--recstart", "--recend", "--ssh", "--sshdelay", "--limit", "--profile", "--filter"],
+]);
+/** The separators before parallel's arguments (`::: a b`) or the files that list them (`::::`). */
+const PARALLEL_ARGS = /^::::?\+?$/;
+/** Parallel's replacement strings: `{}`, `{.}`, `{/}`, `{//}`, `{/.}`, `{#}`, `{%}`, `{1}`. */
+const REPLACEMENT = /\{[\d./#%]*\}/;
+
+/**
+ * What GNU parallel runs through a shell: its command (the words before the first `:::`), for
+ * each argument given after `:::` or piped to it (`fed`), in place of its replacement strings or
+ * after it. With no command, each argument is a command line. Arguments read from a file
+ * (`::::`) or the terminal aren't known, so the command is judged as written.
+ */
+function parallelScripts(cmd: SimpleCommand, args: string[], fed: string[]): InlineScript[] {
+  let i = 0;
+  let mark: string | undefined;
+  for (; i < args.length && args[i]?.startsWith("-"); i += 1) {
+    if (args[i] === "-I") mark = args[i + 1];
+    if (PARALLEL_VALUED.has(args[i] as string)) i += 1;
+  }
+  const end = args.findIndex((a, k) => k >= i && PARALLEL_ARGS.test(a));
+  const words = args.slice(i, end < 0 ? args.length : end);
+  const given: string[] = [];
+  let listed = true;
+  for (const arg of end < 0 ? [] : args.slice(end)) {
+    if (PARALLEL_ARGS.test(arg)) listed = !arg.startsWith("::::");
+    else if (listed) given.push(arg);
+  }
+  const places = (end < 0 ? fed : given).slice(0, MAX_PLACES);
+  if (words.length === 0) return places.map((place) => line(place, expands(cmd, place)));
+  const template = words.join(" ");
+  const marked = REPLACEMENT.test(template) || (mark !== undefined && template.includes(mark));
+  const all = new RegExp(REPLACEMENT.source, "g");
+  return (places.length > 0 ? places : ["{}"]).map((place) => {
+    const filled = template.replace(all, () => place);
+    const text = marked ? (mark ? filled.split(mark).join(place) : filled) : `${template} ${place}`;
+    return line(
+      text,
+      words.some((w) => expands(cmd, w)),
+    );
+  });
+}
+
 /** `[scriptblock]::Create(…)`, with the string it is given when that is written out. */
 const SCRIPT_BLOCK = /\[scriptblock\]::Create\(\s*(?:'((?:[^']|'')*)'|"((?:[^"`]|`.)*)")?/gi;
 
@@ -219,10 +332,12 @@ export function toolScripts(
   if (bin === "git") return [...blocks, ...gitScripts(cmd, args)];
   if (/^[gmn]?awk$/.test(bin)) return [...blocks, ...awkScripts(args)];
   if (bin === "find" || bin === "fd") return [...blocks, ...searchScripts(cmd, bin, args)];
-  if (bin === "xargs") {
+  if (bin === "xargs" || bin === "parallel") {
     const fed = feed.source ? listedPaths(feed.source, ctx).slice(0, MAX_PLACES) : [];
+    if (bin === "parallel") return [...blocks, ...parallelScripts(cmd, args, fed)];
     return [...blocks, ...placed(cmd, xargsCommand(args), fed, true)];
   }
+  if (bin === "dotenv") return [...blocks, ...dotenvScripts(cmd, args)];
   if (bin === "trap") {
     // `trap -l` and `trap -p` only list; `trap - EXIT` and `trap '' INT` run nothing.
     const [action, ...signals] = args[0] === "--" ? args.slice(1) : args;
@@ -233,5 +348,6 @@ export function toolScripts(
     const bodies = args.flatMap((a) => /^[^=\s]+=(.+)$/s.exec(a)?.[1] ?? []);
     return [...blocks, ...bodies.map((body) => line(body))];
   }
-  return [...blocks, ...runnerScripts(cmd, binName(bin), args)];
+  const runner = binName(bin);
+  return [...blocks, ...runnerScripts(cmd, runner, args), ...byName(cmd, runner, args)];
 }

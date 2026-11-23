@@ -35,7 +35,7 @@ export function scriptsOf(
     ...toolScripts(cmd, bin, args, ctx, feed),
   ];
   // What the shell itself runs, or reads from a heredoc it filled in, sees the shell's variables.
-  const fed = stdinScripts(cmd, bin, args, feed, ctx.stdin);
+  const fed = stdinScripts(cmd, bin, args, feed, ctx);
   const inShell = SAME_SHELL.has(bin) ? scripts : [];
   const scoped = [...inShell, ...fed].map((script) => ({ ...script, scope: cmd.scope }));
   return [...(SAME_SHELL.has(bin) ? [] : scripts), ...scoped];
@@ -84,7 +84,7 @@ export interface RanCode {
 export function codeOf(cmd: SimpleCommand, feed: Feed, ctx: RiskContext): RanCode {
   const { tokens } = unwrap(cmd.words);
   const bin = binName(tokens[0]);
-  const input = stdinCode(cmd, bin, feed, ctx.stdin);
+  const input = stdinCode(cmd, bin, feed, ctx);
   const code = inlineCode(bin, tokens.slice(1));
   return { code: input?.text ? [...code, input.text] : code, unknown: input?.dynamic === true };
 }
