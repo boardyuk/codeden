@@ -12,14 +12,27 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  */
 const ECHO_OFF = /^@[\w%.\\/]/;
 
+/** A command's words without the ones that don't change what runs (`unwrap`). */
+export interface Unwrapped {
+  /** The program and its arguments. */
+  tokens: string[];
+  elevated: boolean;
+  /** The folders `env -C dir` (`--chdir`) moves into before running it, in order. */
+  chdir: string[];
+  /** The variable assignments before it (`GIT_DIR=x git …`, `env GIT_DIR=x git …`). */
+  assigns: string[];
+}
+
 /**
  * Words that don't change what runs: elevation (`sudo`), wrappers (`env -u X Y=1`, `command`,
- * `exec`), shell keywords that start a compound command (`if`, `then`, `do`, `{`, ...) and cmd's
+ * `builtin`, `exec`), shell keywords that start a compound command (`if`, `then`, `do`, `{`, ...) and cmd's
  * `@`. `env` with no command to run prints the environment, so it stays the program then.
  */
-export function unwrap(words: string[]): { tokens: string[]; elevated: boolean } {
+export function unwrap(words: string[]): Unwrapped {
   let elevated = false;
   let rest = words;
+  const chdir: string[] = [];
+  const assigns: string[] = [];
   for (;;) {
     const head = rest[0]?.toLowerCase();
     if (head === "sudo" || head === "doas" || head === "runas" || head === "gsudo") {
@@ -27,14 +40,15 @@ export function unwrap(words: string[]): { tokens: string[]; elevated: boolean }
       rest = rest.slice(1).filter((t, i) => !(i === 0 && t.startsWith("-")));
     } else if (binName(head) === "env") {
       // Also `/usr/bin/env node x.js` and `env.exe …`.
-      const command = envCommand(rest.slice(1));
+      const command = envCommand(rest.slice(1), chdir);
       if (command.every((w) => ASSIGNMENT.test(w))) break;
       rest = command;
-    } else if (head === "command" || head === "exec" || head === "nohup") {
+    } else if (head === "command" || head === "builtin" || head === "exec" || head === "nohup") {
       rest = rest.slice(1);
     } else if (head && KEYWORDS.has(head)) {
       rest = rest.slice(1);
     } else if (head && ASSIGNMENT.test(head)) {
+      assigns.push(rest[0] as string);
       rest = rest.slice(1);
     } else if (head === "@") {
       rest = rest.slice(1);
@@ -42,7 +56,7 @@ export function unwrap(words: string[]): { tokens: string[]; elevated: boolean }
       rest = [(rest[0] as string).slice(1), ...rest.slice(1)];
     } else break;
   }
-  return { tokens: rest, elevated };
+  return { tokens: rest, elevated, chdir, assigns };
 }
 
 /** `env`'s short options that take a value: `-u NAME`, `-C DIR`, `-S STRING`, `-P PATH`, `-a ARG`. */
@@ -51,28 +65,35 @@ const ENV_VALUE = "uCSPa";
 const ENV_LONG_VALUE = new Set(["--unset", "--chdir", "--split-string", "--argv0"]);
 
 /**
- * The words after `env`'s options: its assignments and the command it runs. `-S "cmd args"`
- * (`--split-string`) gives the command as one string, split here.
+ * The words after `env`'s options: its assignments and the command it runs. The folders it moves
+ * into (`-C dir`, `--chdir=dir`) are added to `chdir`. `-S "…"` (`--split-string`) gives more
+ * words as one string, options included, read here like the others.
  */
-function envCommand(args: string[]): string[] {
+function envCommand(args: string[], chdir: string[]): string[] {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === "--") return args.slice(i + 1);
     if (!arg.startsWith("-")) return args.slice(i);
     let value: string | undefined;
-    let split = false;
+    let option: string;
     if (arg.startsWith("--")) {
       const [name = "", ...rest] = arg.split("=");
       if (!ENV_LONG_VALUE.has(name)) continue;
       value = rest.length > 0 ? rest.join("=") : args[++i];
-      split = name === "--split-string";
+      option = name === "--split-string" ? "S" : name === "--chdir" ? "C" : "";
     } else {
       const at = [...arg.slice(1)].findIndex((c) => ENV_VALUE.includes(c)) + 1;
       if (at === 0) continue;
       value = arg.slice(at + 1) || args[++i];
-      split = arg[at] === "S";
+      option = arg[at] as string;
     }
-    if (split) return [...(value ?? "").split(/\s+/).filter(Boolean), ...args.slice(i + 1)];
+    if (option === "C" && value !== undefined) chdir.push(value);
+    if (option === "S") {
+      return envCommand(
+        [...(value ?? "").split(/\s+/).filter(Boolean), ...args.slice(i + 1)],
+        chdir,
+      );
+    }
   }
   return [];
 }

@@ -23,6 +23,11 @@ export interface PathContext {
    * `popd`/`Pop-Location` to go back to (`./locations`).
    */
   pushed?: readonly SavedLocation[];
+  /**
+   * True when the command sets `CDPATH`, which sends a `cd` to a relative folder (`cd other`) to
+   * any folder it lists: such a `cd` lands in a folder only known when it runs (#614).
+   */
+  cdPath?: boolean;
   /** Extra writable roots (SessionOptions.additionalDirectories). */
   extraRoots?: readonly string[];
   /** The OS temp directories. Defaults to `osTempRoots()` for the running platform. */
@@ -120,12 +125,10 @@ function fromGitBash(value: string, temp: string | undefined): string {
 }
 
 /**
- * Resolve `target` (absolute, relative to `dir`, `~`-prefixed, or starting with a home, temp or
- * CodeDen home variable) to an absolute path. On Windows the directory it resolves from may be
- * in Git Bash form too: the shell reports `/c/Users/x/repo` once a command has run in it.
+ * `target` with its quotes taken off and `~`, the home, temp and CodeDen home variables at its
+ * start expanded; on Windows, a Git Bash path (`/c/x`, `/tmp/x`) as a Windows path.
  */
-export function resolveAgainst(target: string, ctx: PathContext): string {
-  const p = pathApi(ctx);
+function expand(target: string, ctx: PathContext): string {
   let value = target.trim().replace(/^["']|["']$/g, "");
   const home = homeOf(ctx);
   if (value === "~" || value.startsWith("~/") || value.startsWith("~\\")) {
@@ -136,12 +139,61 @@ export function resolveAgainst(target: string, ctx: PathContext): string {
   if (codeden) for (const vars of CODEDEN_HOME_VARS) value = value.replace(vars, codeden);
   const temp = tempRootsOf(ctx)[0];
   if (temp) for (const vars of TEMP_VARS) value = value.replace(vars, temp);
-  let base = ctx.dir ?? ctx.cwd;
-  if (isWin(ctx)) {
-    value = fromGitBash(value, temp);
-    base = fromGitBash(base, temp);
+  return isWin(ctx) ? fromGitBash(value, temp) : value;
+}
+
+/**
+ * `dir` after a `cd` to a folder that can't be known before the command runs (`cd $X`, `cd -`,
+ * `cd "$(…)"`; `./locations`). No real path holds a NUL. Paths relative to it resolve below
+ * `UNKNOWN_ROOT`, outside every root, and `..` never climbs out of it.
+ */
+export const UNKNOWN_DIR = "\0unknown";
+const UNKNOWN_ROOT = { posix: "/\0unknown", win32: "\\\\\0unknown\\folder" };
+
+/** True when `dir` is the folder of `UNKNOWN_DIR`. */
+export const isUnknownDir = (dir: string | undefined): boolean => dir === UNKNOWN_DIR;
+
+/**
+ * True when `value` (expanded) names the same place wherever the shell is: an absolute path, on
+ * Windows with its drive (`\x` is on the current drive) or a UNC path.
+ */
+function rooted(value: string, ctx: PathContext): boolean {
+  return isWin(ctx) ? /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(value) : value.startsWith("/");
+}
+
+/**
+ * True when a `cd` to `target` lands in a folder known before the command runs: no variable but
+ * the home, temp and CodeDen home ones, no substitution (`$(…)`, backticks, PowerShell's `(…)`),
+ * no cmd variable (`%X%`, `%~dp0`), brace expansion, wildcard (`.?` and `..*` can match `..`) or
+ * `~user`, and not `cd -` (or PowerShell's `cd +`), which go back (or forward) in a history the
+ * classifier doesn't see. From an unknown folder, only a rooted path is known; with `CDPATH` set
+ * (`cdPath`), only a rooted one or one starting with `.` or `..`.
+ */
+export function isKnownFolder(target: string, ctx: PathContext): boolean {
+  const raw = target.trim().replace(/^["']|["']$/g, "");
+  if (/^[+-]\d*$/.test(raw) || /^~[^\\/]/.test(raw)) return false;
+  if (/[*?[`]|^\(|\{[^}]*\}/.test(raw)) return false;
+  const value = expand(target, ctx);
+  if (/[$%]/.test(value)) return false;
+  if (rooted(value, ctx)) return true;
+  if (ctx.cdPath && !/^\.\.?(?:[\\/]|$)/.test(raw)) return false;
+  return !isUnknownDir(ctx.dir);
+}
+
+/**
+ * Resolve `target` (absolute, relative to `dir`, `~`-prefixed, or starting with a home, temp or
+ * CodeDen home variable) to an absolute path. On Windows the directory it resolves from may be
+ * in Git Bash form too: the shell reports `/c/Users/x/repo` once a command has run in it.
+ */
+export function resolveAgainst(target: string, ctx: PathContext): string {
+  const p = pathApi(ctx);
+  const value = expand(target, ctx);
+  const base = ctx.dir ?? ctx.cwd;
+  if (isUnknownDir(base) && !rooted(value, ctx)) {
+    const parts = value.split(/[\\/]+/).filter((s) => s && s !== "." && s !== "..");
+    return p.join(isWin(ctx) ? UNKNOWN_ROOT.win32 : UNKNOWN_ROOT.posix, ...parts);
   }
-  return p.resolve(base, value);
+  return p.resolve(isWin(ctx) ? fromGitBash(base, tempRootsOf(ctx)[0]) : base, value);
 }
 
 /** True when `target` resolves inside `root` (or equals it). Case-insensitive on Windows. */

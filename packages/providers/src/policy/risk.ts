@@ -1,6 +1,6 @@
 import { currentGitBranch } from "../util/git-head";
 import { agentPermissionsCommand, agentPermissionsWrite } from "./agent-permissions";
-import { type RiskAssessment, risky, SAFE } from "./assessment";
+import { asksAtEveryLevel, type RiskAssessment, risky, SAFE } from "./assessment";
 import { CODEDEN_WHAT, codedenCommand, pathsOf } from "./codeden-command";
 import {
   codedenAccess,
@@ -9,15 +9,8 @@ import {
   touchesCodedenCredentials,
   touchesCodedenHome,
 } from "./codeden-home";
-import {
-  binName,
-  DISCARD,
-  isScriptBlock,
-  joinScriptBlocks,
-  namedArg,
-  scriptBlockWords,
-  unwrap,
-} from "./command-words";
+import { binName, DISCARD, unwrap } from "./command-words";
+import { copyWrites } from "./copies";
 import { classifyDelete } from "./deletes";
 import { downloadWrites } from "./downloads";
 import { dumpsEnvironment } from "./env-dumps";
@@ -31,7 +24,6 @@ import {
   isInside,
   isInWorkspace,
   isSecretPath,
-  isTempRoot,
   isWritable,
   type PathContext,
   providerPath,
@@ -43,6 +35,7 @@ import { loginRisk, providerLoginCommand, touchesProviderLogin } from "./provide
 import { keptWords } from "./ps-assignments";
 import { registryChange, registryExports } from "./registry";
 import { pipesDownloadIntoInterpreter } from "./remote-scripts";
+import { codedenFolderRisk, folderRisk } from "./run-folder";
 import { braceAlternatives, secretArgument, toolOutputs } from "./secrets";
 import { parseShell, type ShellDialect, type SimpleCommand } from "./shell";
 
@@ -77,12 +70,16 @@ const MAX_DEPTH = 4;
  * CLIs' logins, are looked for first, across the whole command, so an earlier ordinary risk
  * (`cat .env; …`) can't hide them.
  */
-export function classifyCommand(command: string, ctx: RiskContext): RiskAssessment {
+export function classifyCommand(command: string, given: RiskContext): RiskAssessment {
+  // `CDPATH` sends a `cd` to a relative folder anywhere it lists (#614).
+  const ctx = /\bCDPATH\b/.test(command) ? { ...given, cdPath: true } : given;
   const list = parseShell(command, ctx.shell ?? "auto");
   // What every level asks about, looked for across the whole command first: CodeDen's own home
-  // and credentials, an agent CLI's login, then a write of an agent's own allow-list.
+  // and credentials (and a command run there), an agent CLI's login, then a write of an agent's
+  // own allow-list.
   const always =
     firstInList(list, ctx, 0, codedenCommand) ??
+    firstInList(list, ctx, 0, (cmd, here) => codedenFolderRisk(cmd, here)) ??
     firstInList(list, ctx, 0, (cmd, here) => providerLoginCommand(cmd, here)) ??
     firstInList(list, ctx, 0, (cmd, here) => agentPermissionsCommand(cmd, here));
   if (always) return always;
@@ -212,7 +209,29 @@ interface Placement {
   source?: SimpleCommand;
 }
 
+/**
+ * One simple command's verdict. Anything but a read run outside the worktree asks as a write there
+ * (`./run-folder`, #614), so Full asks too: that beats a risk Full lets through (a force push in
+ * another repository), while a write outside the worktree the checks found keeps its own reason.
+ * What a shell's inline script or `Start-Process` runs is judged where it runs instead.
+ */
 function classifySimple(
+  cmd: SimpleCommand,
+  ctx: RiskContext,
+  depth: number,
+  at: Placement,
+): RiskAssessment {
+  const verdict = classifyActions(cmd, ctx, depth, at);
+  if (verdict.risky && (verdict.action === "outside_worktree" || asksAtEveryLevel(verdict))) {
+    return verdict;
+  }
+  const { tokens } = unwrap(cmd.words);
+  const scripts = depth < MAX_DEPTH ? inlineScripts(binName(tokens[0]), tokens.slice(1), cmd) : [];
+  return (scripts.length > 0 ? undefined : folderRisk(cmd, ctx)) ?? verdict;
+}
+
+/** What one simple command does: the classifier's checks, wherever it runs. */
+function classifyActions(
   cmd: SimpleCommand,
   ctx: RiskContext,
   depth: number,
@@ -257,21 +276,13 @@ function classifySimple(
   const registry = registryChange(bin, args, tokens);
   if (registry) return registry;
 
-  const dest = copyDestination(bin, args);
-  // A destination a script block computes (`-Destination { 'C:\Old\' + $_.Name }`): any of its
-  // words may name it.
-  const block = dest !== undefined && isScriptBlock(dest);
-  const dests = !dest
-    ? []
-    : block
-      ? scriptBlockWords(dest).filter((w) => !w.startsWith("-"))
-      : [dest];
+  const copies = copyWrites(bin, args, ctx);
   const outputs = [...toolOutputs(bin, args), ...registryExports(bin, args)];
   const items = itemWrites(cmd, ctx, at.source);
   const downloads = downloadWrites(cmd, ctx);
-  const written = [...dests, ...outputs, ...items.words, ...downloads.words];
-  const targets = [...(dest && !block ? copyTargets(bin, args, dest, ctx) : dests), ...outputs];
-  for (const target of [...targets, ...items.targets, ...downloads.targets]) {
+  const written = [...copies.words, ...outputs, ...items.words, ...downloads.words];
+  const targets = [...copies.targets, ...outputs, ...items.targets, ...downloads.targets];
+  for (const target of targets) {
     const write = classifyWrite(target, ctx);
     if (write.risky) return write;
   }
@@ -291,49 +302,6 @@ function classifySimple(
   }
   // CodeDen's project config: `sed -i`, `git checkout --` and inline code reach it too.
   return projectConfigCommand(cmd, ctx) ?? SAFE;
-}
-
-const COPIES = ["cp", "mv", "copy", "move", "copy-item", "move-item", "xcopy", "robocopy"];
-const WRITERS = ["tee", "set-content", "out-file", "add-content"];
-/** cmd-style copies, whose `/X` words are switches; for `cp` and `mv`, `/tmp` is a path. */
-const CMD_COPIES = ["copy", "move", "xcopy", "robocopy"];
-
-/** The path-like words of a copy or write: not options, nor cmd switches (`/E`, `/R:3`). */
-function operands(bin: string, args: string[]): string[] {
-  return args.filter(
-    (a) => !a.startsWith("-") && !(CMD_COPIES.includes(bin) && /^\/[a-z]+(:\S*)?$/i.test(a)),
-  );
-}
-
-/** Where a copy, move or file-writing command writes: a path, or a script block computing one. */
-function copyDestination(bin: string, words: string[]): string | undefined {
-  if (!COPIES.includes(bin) && !WRITERS.includes(bin)) return undefined;
-  const args = joinScriptBlocks(words);
-  const named = WRITERS.includes(bin)
-    ? namedArg(args, ["-path", "-filepath", "-literalpath"])
-    : namedArg(args, ["-destination"]);
-  if (named) return named;
-  const positional = operands(bin, args);
-  return WRITERS.includes(bin) ? positional[0] : positional.at(-1);
-}
-
-/**
- * The paths a copy or write lands on. A copy into a temp directory itself (`cp a.png /tmp/`)
- * writes the copied names inside it, so they are checked instead (a secrets file there asks).
- */
-function copyTargets(bin: string, args: string[], dest: string, ctx: RiskContext): string[] {
-  if (!COPIES.includes(bin) || !isTempRoot(dest, ctx)) return [dest];
-  const sources = operands(bin, args).filter((a) => a !== dest);
-  const names = sources
-    .map(
-      (s) =>
-        s
-          .replace(/[\\/]+$/, "")
-          .split(/[\\/]/)
-          .pop() ?? "",
-    )
-    .filter(Boolean);
-  return names.length ? names.map((name) => `${dest.replace(/[\\/]+$/, "")}/${name}`) : [dest];
 }
 
 /**

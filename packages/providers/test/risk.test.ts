@@ -57,7 +57,8 @@ describe("classifyCommand", () => {
     expect(action("git push -f origin main")).toBe("git_destructive");
     expect(action("git push --force-with-lease origin HEAD")).toBe("git_destructive");
     expect(action("git push origin +main")).toBe("git_destructive");
-    expect(action("git -C ../other push -f")).toBe("git_destructive");
+    // In another repository it runs outside the worktree, which Full asks about too (#614).
+    expect(action("git -C ../other push -f")).toBe("outside_worktree");
   });
 
   it("flags branch, tag and remote branch deletion", () => {
@@ -100,10 +101,15 @@ describe("classifyCommand", () => {
       "git push --force-with-lease --all",
       `git push origin +${own}`,
       `git push origin --delete ${own}`,
+    ]) {
+      expect(action(cmd, mine), cmd).toBe("git_destructive");
+    }
+    // Another repository: it runs outside the worktree, which Full asks about too (#614).
+    for (const cmd of [
       "git -C ../other push --force-with-lease",
       "cd ../other && git push --force-with-lease",
     ]) {
-      expect(action(cmd, mine), cmd).toBe("git_destructive");
+      expect(action(cmd, mine), cmd).toBe("outside_worktree");
     }
     // Checked out elsewhere, or no branch of its own: asks.
     const onMain = { ...mine, currentBranch: () => "main" };
