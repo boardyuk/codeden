@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   type AgentEvent,
   agentEventToNewEvent,
+  type ErrorInfo,
   type ProviderInfo,
   type QueuedMessage,
   type Session,
@@ -15,6 +16,7 @@ import { type Db, openDatabase } from "../../src/db/client";
 import { EventStore } from "../../src/events/store";
 import { InboxService } from "../../src/services/inbox-service";
 import { PmAsks } from "../../src/services/orchestration/asks";
+import { RoleLimitSwitch } from "../../src/services/orchestration/role-limit-switch";
 import { RoleSessions } from "../../src/services/orchestration/role-sessions";
 import type { ProjectService } from "../../src/services/projects/project-service";
 import { Outbox } from "../../src/services/sessions/outbox";
@@ -25,8 +27,8 @@ import {
 } from "../../src/services/sessions/session-service";
 import { removeTree } from "./remove-tree";
 
-const info = (id: string): ProviderInfo =>
-  ({ id, displayName: id, models: [], capabilities: {} }) as unknown as ProviderInfo;
+const info = (id: string, readOnly?: boolean): ProviderInfo =>
+  ({ id, displayName: id, models: [], capabilities: { readOnly } }) as unknown as ProviderInfo;
 
 export interface RoleEnv {
   db: Db;
@@ -36,6 +38,14 @@ export interface RoleEnv {
   sessions: SessionService;
   inbox: InboxService;
   asks: PmAsks;
+  /** The switch at a usage limit, fed the store's events and every message sent to a role. */
+  limits: RoleLimitSwitch;
+  /** The providers the runner loaded, in its order, and whether each can run read-only. */
+  providers(list: { id: string; readOnly: boolean }[]): void;
+  /** The providers ready for new work (default: not known, so every loaded one). */
+  ready(ids: string[] | null): void;
+  /** Start a turn of the session and fail it with `error`, as the runner's events would. */
+  failTurn(id: string, turnId: string, error: ErrorInfo): void;
   /**
    * Change the settings and apply them to the roles, as `PATCH /api/settings` does. The
    * returned promise is the retirements, which the request itself doesn't wait for.
@@ -89,6 +99,8 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
       const outbox = new Outbox(database.db, store);
       let settings = Settings.parse({});
       let connected = true;
+      let loaded = [info("claude"), info("codex")];
+      let ready: string[] | null = null;
       const stopped: string[] = [];
       const commands: string[] = [];
       const holds = new Map<number, Promise<void>>();
@@ -104,7 +116,7 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
       };
       const projects = { get: () => project } as unknown as ProjectService;
       const runner = {
-        providers: () => [info("claude"), info("codex")],
+        providers: () => loaded,
         isConnected: () => connected,
         request: vi.fn(async (command: { name: string; sessionId: string }) => {
           commands.push(`${command.name} ${command.sessionId}`);
@@ -121,7 +133,10 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
         settings: settingsStore,
         launcher: { launch: vi.fn(async () => {}) },
         outbox,
-        artifacts: { externalizeAttachments: (input: unknown) => input },
+        artifacts: {
+          externalizeAttachments: (input: unknown) => input,
+          resolveAttachments: (input: unknown) => input,
+        },
         tokens: { revokeSession: () => {} },
         inbox: { dismissRequestsForSession: () => {} },
       } as unknown as SessionServiceDeps);
@@ -130,7 +145,7 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
         session: (id) => repo.find(id)?.session,
         onLateReply: () => {},
       });
-      const off = store.subscribe((events) => asks.onEvents(events));
+      const moved: Pick<RoleLimitSwitch, "moved"> = { moved: (...args) => limits.moved(...args) };
       const roles = new RoleSessions({
         db: database.db,
         repo,
@@ -139,8 +154,31 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
         inbox,
         settings: settingsStore,
         runner,
-        onMoved: (from, to) => asks.retarget(from.id, to.id),
+        onMoved: (from, to, why) => {
+          asks.retarget(from.id, to.id);
+          moved.moved(from, to, why);
+        },
         log: (message) => logged.push(message),
+      });
+      const limits = new RoleLimitSwitch({
+        store,
+        repo,
+        roles,
+        inbox,
+        projects,
+        settings: settingsStore,
+        runner,
+        ready: async () => ready ?? loaded.map((p) => p.id),
+        timezone: () => "UTC",
+        log: (message) => logged.push(message),
+      });
+      sessions.setInputDecorator((session, input, from) => {
+        limits.sending(session, input, from);
+        return { input };
+      });
+      const off = store.subscribe((events) => {
+        asks.onEvents(events);
+        limits.onEvents(events);
       });
       const append = (id: string, event: AgentEvent) =>
         store.append([agentEventToNewEvent(id, event)]);
@@ -152,6 +190,19 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
         sessions,
         inbox,
         asks,
+        limits,
+        providers: (list) => {
+          loaded = list.map((p) => info(p.id, p.readOnly));
+        },
+        ready: (ids) => {
+          ready = ids;
+        },
+        failTurn: (id, turnId, error) => {
+          const at = { threadId: `thread-${id}`, turnId };
+          append(id, { type: "thread.started", thread: { id: at.threadId } });
+          append(id, { type: "turn.started", ...at });
+          append(id, { type: "turn.failed", ...at, error });
+        },
         set: (next) => {
           const before = settings.providers;
           settings = Settings.parse(next);

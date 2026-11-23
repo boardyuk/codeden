@@ -6,10 +6,7 @@ import {
   type Settings,
   StartSessionRequest,
 } from "@codeden/contracts";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { rowToSession } from "../../db/rows";
-import { sessions } from "../../db/schema";
 import type { SettingsStore } from "../../settings-store";
 import { conflict, ServiceError } from "../errors";
 import type { InboxService } from "../inbox-service";
@@ -19,12 +16,30 @@ import type { RunnerPort } from "../runner-port";
 import { assertProjectActive } from "../sessions/archived-project";
 import type { SessionRepo, StoredStartMeta } from "../sessions/repo";
 import type { SessionService } from "../sessions/session-service";
+import { limitReset, type RoleFallback } from "./role-fallback";
 import { freshRefusal, isOpenRequest } from "./role-fresh";
+import { allRoleSessionIds, findRoleSession, roleSessionRefs } from "./role-queries";
 
 export type OrchestrationRole = "orchestrator" | "pm";
 
-/** Why a role's session is replaced: its provider setting moved, or a person started fresh. */
-type ReplaceReason = "moved" | "fresh";
+/**
+ * Why a role's session is replaced: its provider setting moved, a person started fresh, its
+ * provider hit its usage limit (`limit`), or that limit has reset and the role goes back.
+ */
+export type ReplaceReason = "moved" | "fresh" | "limit" | "reset";
+
+/** A fallback after a usage limit: the provider that takes over, and the message to send again. */
+export interface FallbackPlan {
+  provider: string;
+  fallback: RoleFallback;
+  /** The message of the turn that failed, sent first on the new session. */
+  first?: Pick<QueuedMessage, "input" | "from">;
+}
+
+/** How a role's session is replaced: why, and where the new one starts when not as settings say. */
+type Replacement = { why: ReplaceReason } & Partial<FallbackPlan>;
+
+const MOVED: Replacement = { why: "moved" };
 
 const EMPTY_META: StoredStartMeta = {
   workspaceMode: "repo_root",
@@ -48,6 +63,10 @@ const keyOf = (role: OrchestrationRole, projectId: string | null) => `${role}:${
  * waiting in the retired session's queue move to the new one, which is then started at once.
  * A person can also start the role over ("Start fresh", `startFresh`): the same change, with
  * the new session started at once. A retired session stays archived and read-only.
+ *
+ * With `settings.providers.autoSwitchOnLimit`, a role whose provider hit its usage limit moves
+ * to a fallback provider the same way (`fallBack`, called by `RoleLimitSwitch`), and its next
+ * use after the limit has reset moves it back.
  */
 export class RoleSessions {
   /** The change of a role's session under way (retire, create or both), by role key. */
@@ -56,7 +75,7 @@ export class RoleSessions {
    * Role sessions retired with nothing to hand over, by role key, until the role's next session
    * is created: `onMoved` then names the session it replaces.
    */
-  private readonly retired = new Map<string, Session>();
+  private readonly retired = new Map<string, { session: Session; plan: Replacement }>();
   /** The last `applyProviderSettings` run: they follow each other. */
   private applying: Promise<void> = Promise.resolve();
 
@@ -71,57 +90,25 @@ export class RoleSessions {
       /** The home runner: its providers are the ones a role can move to. */
       runner: Pick<RunnerPort, "isConnected" | "providers">;
       /** A role's retired session was replaced by a new one (which took over its queue). */
-      onMoved?: (from: Session, to: Session) => void;
+      onMoved?: (from: Session, to: Session, why: ReplaceReason) => void;
+      now?: () => number;
       log?: (message: string) => void;
     },
   ) {}
 
   /** The current role session (the latest that isn't retired), if any. */
   find(role: OrchestrationRole, projectId: string | null): Session | undefined {
-    if (role === "pm" && !projectId) return undefined;
-    const row = this.deps.db
-      .select()
-      .from(sessions)
-      .where(
-        and(
-          eq(sessions.role, role),
-          isNull(sessions.archivedAt),
-          role === "orchestrator"
-            ? isNull(sessions.projectId)
-            : eq(sessions.projectId, projectId as string),
-        ),
-      )
-      .orderBy(desc(sessions.createdAt))
-      .limit(1)
-      .get();
-    return row ? rowToSession(row) : undefined;
+    return findRoleSession(this.deps.db, role, projectId);
   }
 
   /** Ids of every orchestrator and PM session (to keep them out of work digests). */
   roleSessionIds(): Set<string> {
-    const rows = this.deps.db
-      .select({ id: sessions.id })
-      .from(sessions)
-      .where(inArray(sessions.role, ["orchestrator", "pm"]))
-      .all();
-    return new Set(rows.map((r) => r.id));
+    return allRoleSessionIds(this.deps.db);
   }
 
   /** Current role sessions, for the snapshot. */
   refs(): RoleSessionsRef {
-    const rows = this.deps.db
-      .select()
-      .from(sessions)
-      .where(and(inArray(sessions.role, ["orchestrator", "pm"]), isNull(sessions.archivedAt)))
-      .orderBy(sessions.createdAt)
-      .all()
-      .map(rowToSession);
-    const ref: RoleSessionsRef = { orchestrator: null, pms: {} };
-    for (const s of rows) {
-      if (s.role === "orchestrator") ref.orchestrator = s.id;
-      else if (s.projectId) ref.pms[s.projectId] = s.id;
-    }
-    return ref;
+    return roleSessionRefs(this.deps.db);
   }
 
   /** The current role sessions: the orchestrator's and every project's PM. */
@@ -162,14 +149,31 @@ export class RoleSessions {
     return null;
   }
 
+  /** Record the setting a session was checked against; a fallback it ran as ends with it. */
   private recordSetting(sessionId: string, roleProvider: string): void {
-    this.deps.repo.setStartMeta(sessionId, (meta) => ({ ...(meta ?? EMPTY_META), roleProvider }));
+    this.deps.repo.setStartMeta(sessionId, (meta) => ({
+      ...(meta ?? EMPTY_META),
+      roleProvider,
+      fallback: null,
+    }));
   }
 
-  /** Whether the session is to be retired now: its role moved, and no turn is under way. */
-  private shouldRetire(session: Session): boolean {
-    const underWay = isActiveSession(session) || this.deps.sessions.isDelivering(session.id);
-    return !underWay && this.moveTarget(session) !== null;
+  private loaded(provider: string): boolean {
+    return this.deps.runner.providers().some((p) => p.id === provider);
+  }
+
+  /**
+   * How the session is to be replaced now, or null while it stays: its role's setting moved, or
+   * it runs on a fallback whose limit has reset (back to the provider it left, if the runner
+   * still has it, else as settings say). Never while a turn is under way.
+   */
+  private retirement(session: Session): Replacement | null {
+    if (isActiveSession(session) || this.deps.sessions.isDelivering(session.id)) return null;
+    if (this.moveTarget(session) !== null) return MOVED;
+    const fallback = this.deps.repo.find(session.id)?.startMeta?.fallback;
+    if (!fallback || !this.deps.runner.isConnected()) return null;
+    if (!limitReset(fallback, this.deps.now?.() ?? Date.now())) return null;
+    return { why: "reset", provider: fallback.home };
   }
 
   /**
@@ -199,34 +203,37 @@ export class RoleSessions {
    *
    * If the new session can't be started, the messages go back to the old one, which stays the
    * role's session: nothing queued is lost, and the move is tried again on the next use. A
-   * fresh start (`why` "fresh") that can't begin always leaves the old session as it was.
+   * fresh start or a fallback (`why` "fresh", "limit") that can't begin always leaves the old
+   * session as it was.
    */
   private async replace(
     existing: Session | undefined,
     role: OrchestrationRole,
     projectId: string | null,
     always: boolean,
-    why: ReplaceReason = "moved",
+    given: Replacement = MOVED,
   ): Promise<Session | undefined> {
     const key = keyOf(role, projectId);
-    const queued = existing ? await this.retire(existing, why) : [];
-    if (existing) this.retired.set(key, existing);
+    const queued = existing ? await this.retire(existing, given.why) : [];
+    if (existing) this.retired.set(key, { session: existing, plan: given });
     if (!always && queued.length === 0) return undefined;
+    // A role retired earlier with nothing to hand over is created as that change planned it.
+    const replaced = this.retired.get(key);
+    const plan = existing ? given : (replaced?.plan ?? given);
     let created: Session;
     try {
-      created = await this.create(role, projectId);
+      created = await this.create(role, projectId, plan);
     } catch (error) {
-      if (existing && (queued.length > 0 || why === "fresh")) {
+      if (existing && (queued.length > 0 || given.why === "fresh" || given.why === "limit")) {
         this.deps.repo.update(existing.id, (s) => ({ ...s, archivedAt: null }));
         this.deps.sessions.restoreQueued(queued);
         this.retired.delete(key);
       }
       throw error;
     }
-    this.deps.sessions.adoptQueued(created.id, queued);
-    const replaced = this.retired.get(key);
+    this.deps.sessions.adoptQueued(created.id, [...(plan.first ? [plan.first] : []), ...queued]);
     this.retired.delete(key);
-    if (replaced) this.deps.onMoved?.(replaced, created);
+    if (replaced) this.deps.onMoved?.(replaced.session, created, plan.why);
     return created;
   }
 
@@ -277,8 +284,9 @@ export class RoleSessions {
         // A change of this role's session is under way: it checked the settings itself.
         if (this.changing.has(key)) continue;
         const session = this.find(role, projectId);
-        if (!session || !this.shouldRetire(session)) continue;
-        await this.exclusive(key, () => this.replace(session, role, projectId, false));
+        const plan = session && this.retirement(session);
+        if (!session || !plan) continue;
+        await this.exclusive(key, () => this.replace(session, role, projectId, false, plan));
       } catch (error) {
         this.deps.log?.(`role sessions: could not move the ${role} session: ${String(error)}`);
       }
@@ -302,12 +310,30 @@ export class RoleSessions {
         continue;
       }
       const existing = this.find(role, projectId);
-      if (existing && !this.shouldRetire(existing)) return existing;
+      const plan = existing && this.retirement(existing);
+      if (existing && !plan) return existing;
       const session = await this.exclusive(key, () =>
-        this.replace(existing, role, projectId, true),
+        this.replace(existing, role, projectId, true, plan ?? MOVED),
       );
       if (session) return session;
     }
+  }
+
+  /**
+   * The role's provider hit its usage limit (§8.1): replace `session`, the role's current one,
+   * with a new one on `plan.provider`, as one step with a provider move, and send the failed
+   * turn's message again there, ahead of what waited in the queue. Undefined (nothing changed)
+   * when the session is no longer the role's, is changing, or runs a turn again.
+   */
+  async fallBack(session: Session, plan: FallbackPlan): Promise<Session | undefined> {
+    const role = session.role as OrchestrationRole;
+    const key = keyOf(role, session.projectId);
+    const current = this.find(role, session.projectId);
+    if (this.changing.has(key) || current?.id !== session.id) return undefined;
+    if (isActiveSession(current) || this.deps.sessions.isDelivering(current.id)) return undefined;
+    return this.exclusive(key, () =>
+      this.replace(current, role, session.projectId, true, { why: "limit", ...plan }),
+    );
   }
 
   /**
@@ -341,13 +367,18 @@ export class RoleSessions {
     });
     if (refusal) throw refusal;
     const session = await this.exclusive(key, () =>
-      this.replace(existing, role, projectId, true, "fresh"),
+      this.replace(existing, role, projectId, true, { why: "fresh" }),
     );
     if (!session) throw new ServiceError(500, "role_session_missing", "Role session vanished");
     return { session, archived: this.deps.repo.get(existing.id) };
   }
 
-  private async create(role: OrchestrationRole, projectId: string | null): Promise<Session> {
+  /** Start the role's session: as settings say, or on the plan's provider while it is loaded. */
+  private async create(
+    role: OrchestrationRole,
+    projectId: string | null,
+    plan: Replacement = MOVED,
+  ): Promise<Session> {
     const project = role === "pm" && projectId ? this.deps.projects.get(projectId) : null;
     if (role === "pm" && !project) {
       throw new ServiceError(400, "project_required", "A PM needs a project");
@@ -361,6 +392,7 @@ export class RoleSessions {
       startedBy: { kind: "user" },
       title: project ? `PM · ${project.name}` : "Orchestrator",
       autonomy: "auto",
+      ...(plan.provider && this.loaded(plan.provider) && { provider: plan.provider }),
     });
     const result = await this.deps.sessions.start(request);
     if (result.status !== "started") {
@@ -368,6 +400,10 @@ export class RoleSessions {
     }
     const session = this.find(role, projectId);
     if (!session) throw new ServiceError(500, "role_session_missing", "Role session vanished");
+    const { fallback } = plan;
+    if (fallback && session.provider === plan.provider) {
+      this.deps.repo.setStartMeta(session.id, (meta) => ({ ...(meta ?? EMPTY_META), fallback }));
+    }
     return session;
   }
 }

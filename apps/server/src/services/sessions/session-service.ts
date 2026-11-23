@@ -523,7 +523,7 @@ export class SessionService {
    * Queue messages taken from another session (`stopKeepingQueue`) for this one, in their
    * order and each with its sender. They are delivered like any queued message.
    */
-  adoptQueued(id: string, messages: QueuedMessage[]): void {
+  adoptQueued(id: string, messages: Pick<QueuedMessage, "input" | "from">[]): void {
     for (const message of messages) this.deps.outbox.push(id, message.input, message.from);
     if (messages.length > 0) this.flushIfSettled(id);
   }
