@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -249,8 +249,12 @@ describe("commands run outside the worktree (#614)", () => {
   it("finds the folder `git rev-parse --show-toplevel` prints", () => {
     const repo = join(made, "repo");
     const other = join(made, "other");
+    const broken = join(repo, "broken");
     mkdirSync(join(repo, ".git"), { recursive: true });
     mkdirSync(join(other, ".git"), { recursive: true });
+    mkdirSync(broken);
+    // A `.git` file that points nowhere: git fails, and `cd` with no folder goes home.
+    writeFileSync(join(broken, ".git"), "nothing here");
     // No temp roots, so only the worktree makes these folders writable.
     const ctx: RiskContext = { cwd: repo, dir: join(repo, "apps", "web"), tempRoots: [] };
     for (const cmd of [
@@ -263,6 +267,7 @@ describe("commands run outside the worktree (#614)", () => {
     for (const cmd of [
       'cd "$(git rev-parse --show-toplevel)/.." && make clean',
       `cd ${other} && cd $(git rev-parse --show-toplevel) && make clean`,
+      `cd ${broken} && cd $(git rev-parse --show-toplevel) && make clean`,
       "cd $X && cd $(git rev-parse --show-toplevel) && make clean",
       "export GIT_WORK_TREE=/x; cd $(git rev-parse --show-toplevel) && make clean",
     ]) {
