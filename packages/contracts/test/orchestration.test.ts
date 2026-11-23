@@ -16,6 +16,8 @@ import {
   SessionOptions,
   Settings,
   Snapshot,
+  StartFreshRoleRequest,
+  StartFreshRoleResponse,
   StartWorkResult,
   UpdateSessionRequest,
   type WorkSummary,
@@ -236,6 +238,17 @@ describe("orchestration contracts (§8)", () => {
     });
     expect(UpdateSessionRequest.parse({ model: null })).toEqual({ model: null });
     expect(() => UpdateSessionRequest.parse({})).toThrow();
+  });
+
+  it("round-trips Start fresh for a role session (§8.1)", () => {
+    const req = { sessionId: "pm-old" };
+    expect(StartFreshRoleRequest.parse(JSON.parse(JSON.stringify(req)))).toEqual(req);
+    expect(() => StartFreshRoleRequest.parse({})).toThrow();
+    const res = {
+      session: { ...sampleSession, id: "pm-new", role: "pm" as const },
+      archivedSessionId: "pm-old",
+    };
+    expect(StartFreshRoleResponse.parse(JSON.parse(JSON.stringify(res)))).toEqual(res);
   });
 
   it("carries readOnly and session.configure for role sessions", () => {
