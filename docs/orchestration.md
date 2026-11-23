@@ -16,6 +16,8 @@ When you choose another provider there, the current orchestrator or PM conversat
 
 Only a change of that role setting moves them. Changing a project's **Default agent** (or `defaultProvider` in `.codeden/project.json`) leaves the project's PM conversation where it is; it decides where the PM's next fresh conversation starts. Nothing is retired while the runner is restarting, or while it doesn't have the provider you chose: the conversation moves at its next message or wake once the provider is there. If the new conversation can't be started, the old one is kept with its waiting messages. A setting that already named another provider before CodeDen could move them takes effect when you next change it (choose another provider, then the one you want).
 
+**Starting a conversation over.** The orchestrator's and each PM's chat is one long conversation. When it has grown hard to read or carries stale context, choose **Start fresh…** in the chat's ⋯ menu. After you confirm, the current conversation is archived and a new, empty one starts on the provider and model set in **Settings → Providers → Defaults per role** (so it is also a way out of a provider that keeps failing). Project notes, scheduled wake-ups, updates not yet delivered, open inbox items and the work the PM started carry over; the old history doesn't, and nothing is deleted. Start fresh waits while a turn is running or a question or approval is open: the menu says which. The earlier conversation stays readable but can't be continued; open it from the toast, from search, or, for a PM, from the project's **Archived** sessions. The same holds for a conversation retired by a provider change.
+
 ![A PM reporting on its project](images/pm-chat.png)
 
 ## How work flows
