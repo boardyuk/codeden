@@ -245,7 +245,7 @@ export class SessionService {
       workspaceFallback: null,
       forced,
       queuedBehind,
-      // A pending start keeps its pasted images as artifacts, like a queued message.
+      // A pending start keeps its pasted images and files as artifacts, like a queued message.
       pending: queued
         ? { input: req.input && this.externalize(session, req.input), workspace }
         : null,
@@ -647,7 +647,7 @@ export class SessionService {
     return { status: "queued" };
   }
 
-  /** Pasted images saved as artifacts: the form CodeDen stores (queued messages). */
+  /** Pasted images and files saved as artifacts: the form CodeDen stores (queued messages). */
   private externalize(session: Session, input: UserInput): UserInput {
     return this.deps.artifacts.externalizeAttachments(input, {
       sessionId: session.id,
