@@ -1,6 +1,9 @@
+import { gitTopLevel } from "../util/git-head";
 import { binName, CD, namedArg, unwrap } from "./command-words";
 import {
   isKnownFolder,
+  isUnknownDir,
+  isWin,
   type PathContext,
   providerPath,
   resolveAgainst,
@@ -56,6 +59,9 @@ function afterCd<T extends PathContext>(cmd: SimpleCommand, ctx: T): T[] {
       : [ctx];
   }
   if (POP.has(bin)) return afterPop(bin, tokens.slice(1), ctx);
+  if (tokens.length === 1 && isWin(ctx) && /^[a-z]:$/i.test(tokens[0] as string)) {
+    return [toDrive(tokens[0] as string, ctx)];
+  }
   if (!CD.has(bin)) return [ctx];
   const { stack, args } = withoutStackName(tokens.slice(1));
   const target = cdTarget(args);
@@ -95,13 +101,43 @@ function afterPop<T extends PathContext>(bin: string, words: string[], ctx: T): 
  * The context with its location moved to `target`: a folder, an item on a PowerShell drive, or a
  * folder only known when the command runs (`cd $X`, `cd -`: `UNKNOWN_DIR`, #614).
  */
-export function moveTo<T extends PathContext>(target: string, ctx: T): T {
+export function moveTo<T extends PathContext>(given: string, ctx: T): T {
+  const target = withTopLevel(given, ctx);
   const provider = providerPath(target, ctx);
   if (provider && provider.path === undefined) return { ...ctx, psDrive: provider.drive };
   const onDisk = { ...ctx, psDrive: undefined };
   const folder = provider?.path ?? target;
   if (!isKnownFolder(folder, onDisk)) return { ...onDisk, dir: UNKNOWN_DIR };
   return { ...onDisk, dir: resolveAgainst(folder, onDisk) };
+}
+
+/** `$(git rev-parse --show-toplevel)` (or in backticks) at the start of a word. */
+const TOP_LEVEL =
+  /^(["']?)(?:\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\)|`\s*git\s+rev-parse\s+--show-toplevel\s*`)/;
+
+/**
+ * `target` with the repository's top folder in place of a `git rev-parse --show-toplevel` it
+ * starts with (`cd "$(git rev-parse --show-toplevel)/apps/web"`), found on disk from where the
+ * shell is (`gitTopLevel`). Left as it is (a folder only known when it runs) when the shell is
+ * somewhere unknown, the command sets `GIT_DIR` or `GIT_WORK_TREE` (`gitEnv`), the paths are
+ * another platform's, or no repository holds the folder.
+ */
+function withTopLevel(target: string, ctx: PathContext): string {
+  const match = TOP_LEVEL.exec(target.trim());
+  if (!match || ctx.gitEnv || isUnknownDir(ctx.dir) || ctx.psDrive) return target;
+  if ((ctx.platform ?? process.platform) !== process.platform) return target;
+  const top = gitTopLevel(resolveAgainst(".", ctx));
+  return top === undefined ? target : `${match[1]}${top}${target.trim().slice(match[0].length)}`;
+}
+
+/**
+ * PowerShell's `D:` (a function running `Set-Location D:`) and cmd's `D:`: to the folder the shell
+ * last stood in on that drive, which may be any. The same drive changes nothing.
+ */
+function toDrive<T extends PathContext>(drive: string, ctx: T): T {
+  const here = isUnknownDir(ctx.dir) ? undefined : resolveAgainst(".", ctx);
+  const same = here?.toLowerCase().startsWith(drive.toLowerCase()) === true;
+  return same && !ctx.psDrive ? ctx : { ...ctx, psDrive: undefined, dir: UNKNOWN_DIR };
 }
 
 /** Back to the latest location saved on `stack` (the default stack when undefined). */

@@ -1,21 +1,23 @@
-import { type RiskAssessment, risky } from "./assessment";
-import { credentialsRisk, touchesCodedenHome } from "./codeden-home";
-import { binName, unwrap } from "./command-words";
+import { mostSevere, type RiskAssessment } from "./assessment";
+import { binName, CD, unwrap } from "./command-words";
+import { findPaths } from "./deletes";
 import { moveTo } from "./locations";
-import { isTempRoot, isUnknownDir, isWritable, type PathContext } from "./paths";
+import { isUnknownDir, type PathContext, pathApi } from "./paths";
 import { programDenial } from "./read-only";
 import { matchesLong } from "./read-only-options";
 import type { SimpleCommand } from "./shell";
+import { runsInRisk } from "./workdir";
 
 /**
  * Where a command runs (§11.2, #614). A command that changes something without naming a path
  * (`git reset --hard`, `make clean`, `npm install`) changes the folder it runs in: where a `cd`,
  * `pushd` or `Set-Location` earlier in the command line moved (`./locations`), or the folder a
  * program's own option names (`git -C dir`, `make -C dir`, `npm --prefix dir`, `env -C dir`, ...).
- * Outside the session's writable roots (the worktree, extra roots, temp and notes folders), such a
- * command asks as a write there, unless it only reads (`programDenial`, the read-only rules).
- * In CodeDen's own home, outside the session's own worktree, it asks at every level. A folder only
- * known when the command runs (`cd $X`, `cd -`) counts as outside.
+ * Each folder is judged by `./workdir`'s `runsInRisk`, the rule for the folder a provider reports
+ * too: outside the session's writable roots (the worktree, extra roots, temp and notes folders),
+ * anything but a read (`programDenial`, the read-only rules) asks as a write there; in CodeDen's
+ * own home, outside the session's own folders, it asks at every level. A folder only known when
+ * the command runs (`cd $X`, `git -C` given its folder by `xargs`) counts as outside.
  */
 
 /** A program's options that name the folder it works in. */
@@ -50,6 +52,20 @@ const FOLDER_OPTIONS = new Map<string, FolderOptions>([
 
 /** The variables that move git elsewhere (`GIT_DIR=../x/.git git reset --hard`). */
 const GIT_FOLDER_VARS = /^(GIT_DIR|GIT_WORK_TREE)=(.*)$/s;
+/** git's setting that moves its work tree (`git -c core.worktree=../x reset --hard`). */
+const GIT_WORKTREE_SETTING = /^core\.worktree=(.*)$/is;
+
+/**
+ * A folder option given no folder: `xargs git -C` takes it from its input, so it is only known
+ * when the command runs (`./paths`' `isKnownFolder`).
+ */
+const FROM_INPUT = "-";
+
+/** `find`'s actions that run a command in the folder of each file found (`-execdir make \;`). */
+const FIND_IN_FOLDER = new Set(["-execdir", "-okdir"]);
+
+/** Navigation reads and writes nothing where it starts: only where it lands counts. */
+const NAVIGATION = new Set([...CD, "popd", "pop-location", "dirs"]);
 
 /** A folder option's value, by kind: a folder it moves to, or another folder it changes. */
 interface FolderWord {
@@ -58,7 +74,7 @@ interface FolderWord {
 }
 
 /** The folder words in the arguments of a program with folder options (up to `--`). */
-function folderWords(args: readonly string[], options: FolderOptions): FolderWord[] {
+function folderWords(bin: string, args: readonly string[], options: FolderOptions): FolderWord[] {
   const out: FolderWord[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
@@ -69,7 +85,7 @@ function folderWords(args: readonly string[], options: FolderOptions): FolderWor
       const also = options.also?.some((o) => matchesLong(name, o));
       if (!long && !also) continue;
       const word = rest.length > 0 ? rest.join("=") : args[++i];
-      if (word !== undefined) out.push({ word, moves: long === true });
+      out.push({ word: word ?? FROM_INPUT, moves: long === true });
     } else if (/^-[^-]/.test(arg)) {
       // A cluster of short options (`-sC dir`): the first that takes a value ends it.
       for (let k = 1; k < arg.length; k += 1) {
@@ -77,12 +93,30 @@ function folderWords(args: readonly string[], options: FolderOptions): FolderWor
         const folder = options.short?.includes(c) === true;
         if (!folder && !options.valued?.includes(c)) continue;
         const word = arg.slice(k + 1) || args[++i];
-        if (folder && word !== undefined) out.push({ word, moves: true });
+        if (folder) out.push({ word: word ?? FROM_INPUT, moves: true });
+        const setting = bin === "git" && c === "c" ? GIT_WORKTREE_SETTING.exec(word ?? "") : null;
+        if (setting) out.push({ word: setting[1] as string, moves: false });
         break;
       }
     }
   }
   return out;
+}
+
+/**
+ * The folders `find … -execdir cmd` (or `-okdir`) runs its command in: the one holding each path
+ * it searches (`find /x/y` runs it in `/x` for `/x/y` itself), and the folders below it. `.` runs
+ * it in `.`. None for a `find` that runs nothing so.
+ */
+function findFolders(args: readonly string[], base: PathContext): string[] {
+  if (!args.some((a) => FIND_IN_FOLDER.has(a))) return [];
+  const roots = findPaths([...args]);
+  return (roots.length > 0 ? roots : ["."]).map((root) => {
+    const at = moveTo(root, base);
+    const dir = at.dir ?? at.cwd;
+    if (isUnknownDir(dir) || /^\.[\\/]*$/.test(root)) return dir;
+    return pathApi(base).dirname(dir);
+  });
 }
 
 /**
@@ -98,10 +132,12 @@ export function runFolders(cmd: SimpleCommand, ctx: PathContext): string[] {
   const out: string[] = [];
   let moved = false;
   for (const [k, token] of tokens.entries()) {
-    const options = FOLDER_OPTIONS.get(binName(token));
+    const bin = binName(token);
+    if (bin === "find") out.push(...findFolders(tokens.slice(k + 1), base));
+    const options = FOLDER_OPTIONS.get(bin);
     if (!options) continue;
     let here = base;
-    for (const { word, moves } of folderWords(tokens.slice(k + 1), options)) {
+    for (const { word, moves } of folderWords(bin, tokens.slice(k + 1), options)) {
       if (moves) here = moveTo(word, here);
       out.push(at(moves ? here : moveTo(word, here)));
     }
@@ -115,28 +151,19 @@ export function runFolders(cmd: SimpleCommand, ctx: PathContext): string[] {
 }
 
 /**
- * The risk of `cmd` running where it runs (`runFolders`): undefined when it only reads, or every
- * folder it works in is the session's own (a temp folder itself included: what runs there writes
- * inside it). In CodeDen's own home, the risk every level asks about.
+ * The risk of `cmd` running where it runs (`runFolders`), by `runsInRisk`: undefined when every
+ * folder it works in is the session's own, or it only reads outside CodeDen's home. Of several
+ * folders, CodeDen's home wins over the rest (`mostSevere`).
  */
 export function folderRisk(cmd: SimpleCommand, ctx: PathContext): RiskAssessment | undefined {
   const { tokens } = unwrap(cmd.words);
   // Only assignments (`X=1`, PowerShell's `$x = 'a'` after `./ps-assignments`): nothing runs.
-  if (tokens.length === 0 || !programDenial(binName(tokens[0]), tokens.slice(1))) return undefined;
-  const all = runFolders(cmd, ctx);
-  const dirs = all.filter((dir) => !isUnknownDir(dir));
-  const home = dirs.find((dir) => touchesCodedenHome(dir, ctx));
-  if (home !== undefined) return credentialsRisk(`Runs in CodeDen's own home: ${home}`);
-  if (dirs.length < all.length) {
-    return risky(
-      "outside_worktree",
-      "Runs in a folder only known when it runs, which may be outside the worktree",
-    );
-  }
-  const outside = dirs.find((dir) => !isWritable(dir, ctx) && !isTempRoot(dir, ctx));
-  return outside === undefined
-    ? undefined
-    : risky("outside_worktree", `Runs in ${outside}, outside the worktree`);
+  if (tokens.length === 0) return undefined;
+  const bin = binName(tokens[0]);
+  if (NAVIGATION.has(bin)) return undefined;
+  const reads = programDenial(bin, tokens.slice(1)) === undefined;
+  const risks = runFolders(cmd, ctx).flatMap((dir) => runsInRisk(dir, reads, ctx) ?? []);
+  return risks.length > 0 ? mostSevere(risks) : undefined;
 }
 
 /** `folderRisk` when every level asks about it: a command run in CodeDen's own home. */

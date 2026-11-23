@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import { ClaudePolicy } from "../src/claude/permissions";
 import { levelAllows } from "../src/codex/policy";
 import { classifyCommand, type RiskContext } from "../src/policy/risk";
+import { workdirRisk } from "../src/policy/workdir";
 
 /**
  * Commands that change something in the folder they run in, without naming a path (#614): after a
@@ -25,6 +29,10 @@ const win: RiskContext = {
   tempRoots: ["C:\\Users\\me\\AppData\\Local\\Temp"],
 };
 const ps: RiskContext = { ...win, shell: "powershell" };
+
+/** Real folders, for `git rev-parse --show-toplevel`, which is found on disk. */
+const made = mkdtempSync(join(tmpdir(), "codeden-run-folder-"));
+afterAll(() => rmSync(made, { recursive: true, force: true }));
 
 const action = (command: string, ctx: RiskContext = posix) => {
   const r = classifyCommand(command, ctx);
@@ -115,6 +123,9 @@ describe("commands run outside the worktree (#614)", () => {
       "cd /other && pushd /work/repo && popd && git reset --hard",
       'bash -c "cd /other && git reset --hard"',
       "sh -c 'git -C /other clean -fdx'",
+      // The script runs where env moved it, with the repository it was handed.
+      "env -C /other bash -c 'make clean'",
+      "GIT_DIR=/other/.git bash -c 'git reset --hard'",
       "cd /other && sudo make install",
       "builtin cd /other && git reset --hard",
       "command cd /other && git reset --hard",
@@ -150,6 +161,7 @@ describe("commands run outside the worktree (#614)", () => {
       "cd $TMPDIR/build && make",
       "tar -xzf a.tgz -C /tmp/x",
       "env -C src make",
+      "env -C src bash -c 'make clean'",
     ]) {
       expect(action(cmd), cmd).toBeNull();
     }
@@ -207,6 +219,68 @@ describe("commands run outside the worktree (#614)", () => {
     expect(action("export CDPATH=/; cd ./src && make")).toBeNull();
     expect(action("cd -P src && make")).toBeNull();
     expect(action("pushd -n /other && make")).toBeNull();
+  });
+
+  it("follows find -execdir, folders xargs supplies, core.worktree and drive switches", () => {
+    for (const [cmd, ctx] of [
+      // `-execdir` runs in the folder holding each match: `/other` for `/other/x` itself.
+      ["find /other/x -execdir make clean \\;", posix],
+      ["find $X -okdir git reset --hard \\;", posix],
+      // The folder comes from xargs' input.
+      ["echo /other | xargs git -C", posix],
+      ["echo /other | xargs make --directory", posix],
+      ["git -c core.worktree=/other reset --hard", posix],
+      // `D:` moves to wherever the shell last stood on that drive.
+      ["D:; git clean -fdx", ps],
+      ["D: && git clean -fdx", win],
+    ] as const) {
+      expect(asksAtAutoAndFull(cmd, ctx), cmd).toBe(true);
+    }
+    for (const [cmd, ctx] of [
+      ["find . -name '*.o' -execdir rm {} +", posix],
+      ["find src -name '*.o' -execdir rm {} +", posix],
+      ["git -c core.autocrlf=false reset --hard", posix],
+      ["C:; git clean -fdx", ps],
+    ] as const) {
+      expect(action(cmd, ctx), cmd).toBeNull();
+    }
+  });
+
+  it("finds the folder `git rev-parse --show-toplevel` prints", () => {
+    const repo = join(made, "repo");
+    const other = join(made, "other");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(join(other, ".git"), { recursive: true });
+    // No temp roots, so only the worktree makes these folders writable.
+    const ctx: RiskContext = { cwd: repo, dir: join(repo, "apps", "web"), tempRoots: [] };
+    for (const cmd of [
+      "cd $(git rev-parse --show-toplevel) && pnpm test",
+      'cd "$(git rev-parse --show-toplevel)/packages/x" && pnpm build',
+      "cd `git rev-parse --show-toplevel` && make clean",
+    ]) {
+      expect(action(cmd, ctx), cmd).toBeNull();
+    }
+    for (const cmd of [
+      'cd "$(git rev-parse --show-toplevel)/.." && make clean',
+      `cd ${other} && cd $(git rev-parse --show-toplevel) && make clean`,
+      "cd $X && cd $(git rev-parse --show-toplevel) && make clean",
+      "export GIT_WORK_TREE=/x; cd $(git rev-parse --show-toplevel) && make clean",
+    ]) {
+      expect(action(cmd, ctx), cmd).toBe("outside_worktree");
+    }
+  });
+
+  it("judges a folder like the provider's working directory does (workdirRisk)", () => {
+    const home = "/home/me/.codeden";
+    const ctx: RiskContext = { ...posix, codedenHome: home };
+    // CodeDen's home may be caught by another check first, with its own reason.
+    const verdict = (r: ReturnType<typeof classifyCommand>) =>
+      r.risky ? { action: r.action, codeden: r.codeden, reason: r.codeden ? "" : r.reason } : r;
+    for (const dir of ["/other", "/tmp", "/tmp/x", "/work/repo/src", home, `${home}/wt/p/b`]) {
+      const asProvider = verdict(workdirRisk(["make clean"], dir, ctx));
+      expect(verdict(classifyCommand(`cd ${dir} && make clean`, ctx)), dir).toEqual(asProvider);
+      expect(verdict(classifyCommand("make clean", { ...ctx, dir })), dir).toEqual(asProvider);
+    }
   });
 });
 

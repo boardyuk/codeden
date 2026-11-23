@@ -71,8 +71,13 @@ const MAX_DEPTH = 4;
  * (`cat .env; …`) can't hide them.
  */
 export function classifyCommand(command: string, given: RiskContext): RiskAssessment {
-  // `CDPATH` sends a `cd` to a relative folder anywhere it lists (#614).
-  const ctx = /\bCDPATH\b/.test(command) ? { ...given, cdPath: true } : given;
+  // `CDPATH` sends a `cd` to a relative folder anywhere it lists, and `GIT_DIR` or
+  // `GIT_WORK_TREE` a `cd` to the repository's top folder elsewhere (#614).
+  const ctx = {
+    ...given,
+    cdPath: given.cdPath || /\bCDPATH\b/.test(command),
+    gitEnv: given.gitEnv || /\bGIT_(?:DIR|WORK_TREE)\b/.test(command),
+  };
   const list = parseShell(command, ctx.shell ?? "auto");
   // What every level asks about, looked for across the whole command first: CodeDen's own home
   // and credentials (and a command run there), an agent CLI's login, then a write of an agent's
@@ -134,7 +139,7 @@ function firstInList(
       for (const script of scripts) {
         const inner = parseShell(script.text, script.dialect);
         const into = feeds || piped || script.feeds === true;
-        const found = firstInList(inner, scriptContext(script, here), depth + 1, check, into);
+        const found = firstInList(inner, scriptContext(script, cmd, here), depth + 1, check, into);
         if (found) return found;
       }
       for (const one of withKept(cmd)) {
@@ -206,11 +211,13 @@ function withKept(cmd: SimpleCommand): SimpleCommand[] {
 }
 
 /**
- * Where an inline script runs: in its own folder when it names one (`Start-Process
- * -WorkingDirectory`), in a new process, which starts with a location stack of its own.
+ * Where an inline script of `cmd` runs: where `env -C` moved it (`env -C dir bash -c …`), then in
+ * its own folder when it names one (`Start-Process -WorkingDirectory`), in a new process, which
+ * starts with a location stack of its own.
  */
-function scriptContext(script: InlineScript, ctx: RiskContext): RiskContext {
-  const fresh = { ...ctx, pushed: undefined };
+function scriptContext(script: InlineScript, cmd: SimpleCommand, ctx: RiskContext): RiskContext {
+  let fresh: RiskContext = { ...ctx, pushed: undefined };
+  for (const dir of unwrap(cmd.words).chdir) fresh = moveTo(dir, fresh);
   return script.dir ? moveTo(script.dir, fresh) : fresh;
 }
 
@@ -229,7 +236,8 @@ interface Placement {
  * One simple command's verdict. Anything but a read run outside the worktree asks as a write there
  * (`./run-folder`, #614), so Full asks too: that beats a risk Full lets through (a force push in
  * another repository), while a write outside the worktree the checks found keeps its own reason.
- * What a shell's inline script or `Start-Process` runs is judged where it runs instead.
+ * What a shell's inline script or `Start-Process` runs is judged where it runs instead, unless the
+ * shell is handed another repository (`GIT_DIR=… bash -c …`), which its script would use.
  */
 function classifySimple(
   cmd: SimpleCommand,
@@ -241,9 +249,10 @@ function classifySimple(
   if (verdict.risky && (verdict.action === "outside_worktree" || asksAtEveryLevel(verdict))) {
     return verdict;
   }
-  const { tokens } = unwrap(cmd.words);
+  const { tokens, assigns } = unwrap(cmd.words);
   const scripts = depth < MAX_DEPTH ? inlineScripts(binName(tokens[0]), tokens.slice(1), cmd) : [];
-  return (scripts.length > 0 ? undefined : folderRisk(cmd, ctx)) ?? verdict;
+  const gitVars = assigns.some((a) => /^GIT_(?:DIR|WORK_TREE)=/.test(a));
+  return (scripts.length > 0 && !gitVars ? undefined : folderRisk(cmd, ctx)) ?? verdict;
 }
 
 /** What one simple command does: the classifier's checks, wherever it runs. */
@@ -264,7 +273,7 @@ function classifyActions(
     if (script.elevated) return risky("other", "Runs a command with elevated privileges");
     const output = at.shown && !script.feeds ? "shown" : "feeds";
     const list = parseShell(script.text, script.dialect);
-    const inner = classifyList(list, scriptContext(script, ctx), depth + 1, output);
+    const inner = classifyList(list, scriptContext(script, cmd, ctx), depth + 1, output);
     if (inner.risky) return inner;
   }
 

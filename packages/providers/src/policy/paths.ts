@@ -28,6 +28,11 @@ export interface PathContext {
    * any folder it lists: such a `cd` lands in a folder only known when it runs (#614).
    */
   cdPath?: boolean;
+  /**
+   * True when the command sets `GIT_DIR` or `GIT_WORK_TREE`, which move the repository
+   * `git rev-parse --show-toplevel` prints: a `cd` there lands in a folder only known when it runs.
+   */
+  gitEnv?: boolean;
   /** Extra writable roots (SessionOptions.additionalDirectories). */
   extraRoots?: readonly string[];
   /** The OS temp directories. Defaults to `osTempRoots()` for the running platform. */

@@ -301,7 +301,7 @@ export function listedPaths(source: SimpleCommand): string[] {
 }
 
 /** `find [-H|-L|-P] [-D x] [-O1] path… expression`: the paths. */
-function findPaths(args: string[]): string[] {
+export function findPaths(args: string[]): string[] {
   let k = 0;
   while (k < args.length && /^-([HLP]|D|O\d*)$/.test(args[k] as string)) {
     k += args[k] === "-D" ? 2 : 1;

@@ -3,21 +3,49 @@ import { CODEDEN_WHAT } from "./codeden-command";
 import { codedenAccess, credentialsRisk, forReading } from "./codeden-home";
 import { binName, DISCARD } from "./command-words";
 import { inlineScripts, scriptFlag } from "./inline-scripts";
-import { isWritable, type PathContext, resolveAgainst } from "./paths";
+import { isTempRoot, isUnknownDir, isWritable, type PathContext, resolveAgainst } from "./paths";
 import { readOnlyCommandDenial } from "./read-only";
 import { parseShell, type ShellDialect } from "./shell";
 
 /**
- * The folder a shell command runs in, as its provider reports it (§11.2, #613): Codex's request
- * `cwd`, OpenCode's `workdir`, an ACP agent's `cwd`. Relative paths in the command resolve from
- * it (`PathContext.dir`), but a command that names no path acts on it as well: `git clean -fdx`,
- * `git reset --hard`, `make clean` and `npm install` change the folder they run in. So a command
- * that runs where the session may not write (outside the worktree, the extra roots, temp and the
- * notes folders) is a write outside the worktree unless it only reads, and one that runs in
- * CodeDen's own home, outside the session's own folders there, asks at every level like any
- * other access to the home (reads in the session's own artifacts folder excepted). A `cd` inside
- * the command is not followed here.
+ * The folder a shell command runs in (§11.2, #613, #614). A command that names no path acts on
+ * the folder it runs in: `git clean -fdx`, `git reset --hard`, `make clean` and `npm install`
+ * change it. So a command that runs where the session may not write (outside the worktree, the
+ * extra roots, temp and the notes folders) is a write outside the worktree unless it only reads,
+ * and one that runs in CodeDen's own home, outside the session's own folders there, asks at every
+ * level like any other access to the home (reads in the session's own artifacts folder excepted).
+ *
+ * `runsInRisk` is that rule, for one folder. Two callers apply it: `workdirRisk` to the folder a
+ * provider reports (Codex's request `cwd`, OpenCode's `workdir`, an ACP agent's `cwd`), and
+ * `./run-folder` to each folder a command line moves into (`cd`, `git -C`, ...). Both judge "only
+ * reads" by the read-only rules (`./read-only`'s `programDenial`).
  */
+
+/**
+ * The risk of running something in `dir` (absolute, or `UNKNOWN_DIR` for a folder only known when
+ * it runs), or undefined when it may. `reads`: it only reads. A temp folder itself counts as
+ * temp: what runs there writes inside it.
+ */
+export function runsInRisk(
+  dir: string,
+  reads: boolean,
+  ctx: PathContext,
+): RiskAssessment | undefined {
+  if (isUnknownDir(dir)) {
+    if (reads) return undefined;
+    return risky(
+      "outside_worktree",
+      "Runs in a folder only known when it runs, which may be outside the worktree",
+    );
+  }
+  const access = codedenAccess(dir, reads ? forReading(ctx) : ctx);
+  if (access === "credentials") {
+    return credentialsRisk(`Runs in a folder holding ${CODEDEN_WHAT.credentials}: ${dir}`);
+  }
+  if (access) return credentialsRisk(`Runs in ${CODEDEN_WHAT.home}: ${dir}`);
+  if (reads || isWritable(dir, ctx) || isTempRoot(dir, ctx)) return undefined;
+  return risky("outside_worktree", `Runs in ${dir}, outside the worktree`);
+}
 
 /** A context the folder checks can read: paths, plus the shell the command runs in. */
 type WorkdirContext = PathContext & { shell?: ShellDialect };
@@ -79,15 +107,7 @@ export function workdirRisk(
   ctx: WorkdirContext,
 ): RiskAssessment {
   if (dir === undefined || !dir.trim()) return SAFE;
-  const abs = resolveAgainst(dir, ctx);
-  const reads = onlyReads(commands, ctx);
-  const access = codedenAccess(abs, reads ? forReading(ctx) : ctx);
-  if (access === "credentials") {
-    return credentialsRisk(`Runs in a folder holding ${CODEDEN_WHAT.credentials}: ${abs}`);
-  }
-  if (access) return credentialsRisk(`Runs in ${CODEDEN_WHAT.home}: ${abs}`);
-  if (isWritable(abs, ctx) || reads) return SAFE;
-  return risky("outside_worktree", `Runs in ${abs}, outside the worktree`);
+  return runsInRisk(resolveAgainst(dir, ctx), onlyReads(commands, ctx), ctx) ?? SAFE;
 }
 
 /**
