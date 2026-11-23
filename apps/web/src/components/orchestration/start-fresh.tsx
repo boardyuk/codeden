@@ -15,7 +15,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useClient } from "@/lib/api";
-import { useSnapshotData } from "@/lib/queries";
+import { useProjectArchived, useSnapshotData } from "@/lib/queries";
 
 type RoleSession = Session & { role: "orchestrator" | "pm" };
 
@@ -94,6 +94,7 @@ export function useStartFresh(session: Session, running: boolean) {
         description: error instanceof Error ? error.message : String(error),
       }),
   });
+  const projectArchived = useProjectArchived(session.projectId);
   const available = isRole(session) && !session.archivedAt;
   return {
     /** Show "Start fresh": the role's current session. */
@@ -102,7 +103,9 @@ export function useStartFresh(session: Session, running: boolean) {
     blocked: available
       ? mutation.isPending
         ? "Starting fresh…"
-        : startFreshBlocked(session, running, openRequests)
+        : projectArchived
+          ? "The project is archived"
+          : startFreshBlocked(session, running, openRequests)
       : null,
     open: () => setConfirming(true),
     dialog: (

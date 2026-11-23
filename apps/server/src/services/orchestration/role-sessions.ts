@@ -16,6 +16,7 @@ import type { InboxService } from "../inbox-service";
 import { projectDefaultProvider } from "../projects/project-config";
 import type { ProjectService } from "../projects/project-service";
 import type { RunnerPort } from "../runner-port";
+import { assertProjectActive } from "../sessions/archived-project";
 import type { SessionRepo, StoredStartMeta } from "../sessions/repo";
 import type { SessionService } from "../sessions/session-service";
 import { freshRefusal, isOpenRequest } from "./role-fresh";
@@ -332,6 +333,8 @@ export class RoleSessions {
     if (!existing || existing.id !== sessionId) {
       throw conflict(`This is no longer the ${name}'s current conversation`, "not_current");
     }
+    // An archived project's PM is read-only: refused before anything is stopped.
+    assertProjectActive(this.deps.projects, existing);
     const refusal = freshRefusal(existing, {
       delivering: this.deps.sessions.isDelivering(existing.id),
       openRequests: this.deps.inbox.list({ sessionId: existing.id }).filter(isOpenRequest).length,
