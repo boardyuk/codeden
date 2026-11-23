@@ -36,7 +36,9 @@ export function limitReset(fallback: RoleFallback, now: number): boolean {
 
 /**
  * The fallback state after `provider` hit its limit (until `retryAt`, when it said), given the
- * state of the session it happened on (null when that one ran on the role's own provider).
+ * state of the session it happened on (null when that one ran on the role's own provider). The
+ * provider that just failed is always skipped for a while, also when the reset time it gave has
+ * already passed (a stale one), so the role never "falls back" onto the provider at its limit.
  */
 export function afterLimit(
   earlier: RoleFallback | null,
@@ -49,7 +51,8 @@ export function afterLimit(
   for (const [id, until] of Object.entries(earlier?.limited ?? {})) {
     if (Date.parse(until) > now) limited[id] = until;
   }
-  limited[provider] = known ?? new Date(now + UNKNOWN_RESET_MS).toISOString();
+  const ahead = known && Date.parse(known) > now ? known : null;
+  limited[provider] = ahead ?? new Date(now + UNKNOWN_RESET_MS).toISOString();
   return { home: earlier?.home ?? provider, until: earlier ? earlier.until : known, limited };
 }
 

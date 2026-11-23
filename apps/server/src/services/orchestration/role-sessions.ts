@@ -401,7 +401,8 @@ export class RoleSessions {
     const session = this.find(role, projectId);
     if (!session) throw new ServiceError(500, "role_session_missing", "Role session vanished");
     const { fallback } = plan;
-    if (fallback && session.provider === plan.provider) {
+    // Back on the provider it left (its limit reset before the fallback's own): no fallback now.
+    if (fallback && session.provider === plan.provider && session.provider !== fallback.home) {
       this.deps.repo.setStartMeta(session.id, (meta) => ({ ...(meta ?? EMPTY_META), fallback }));
     }
     return session;

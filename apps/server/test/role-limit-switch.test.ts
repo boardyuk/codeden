@@ -188,6 +188,37 @@ describe("role sessions: switching provider at a usage limit (§8.1)", () => {
   );
 
   it(
+    "never picks the provider that just hit its limit, even when its reset time has passed",
+    withRoles(async (env) => {
+      env.providers(BOTH);
+      await pmAtLimit(env, new Date(TEST_START.getTime() - HOUR).toISOString());
+      expect(env.livePms().map((s) => s.provider)).toEqual(["codex"]);
+    }),
+  );
+
+  it(
+    "a fallback that hits its own limit after the first reset goes back, as the role's own again",
+    withRoles(async (env) => {
+      env.providers(BOTH);
+      await pmAtLimit(env, RESET_AT);
+      const [fallback] = env.livePms();
+      env.settle(fallback?.id as string);
+      // Past the reset, inside the minute before the role would go back by itself.
+      vi.setSystemTime(new Date(TEST_START.getTime() + 2 * HOUR + 30_000));
+      env.failTurn(fallback?.id as string, "t2", limit());
+      await env.limits.idle();
+      const [home] = env.livePms();
+      expect(home?.provider).toBe("claude");
+      expect(env.repo.find(home?.id as string)?.startMeta?.fallback ?? null).toBeNull();
+
+      // It isn't a fallback: nothing replaces it later.
+      env.settle(home?.id as string);
+      vi.setSystemTime(new Date(TEST_START.getTime() + 9 * HOUR));
+      expect((await env.roles.ensure("pm", "p1")).id).toBe(home?.id);
+    }),
+  );
+
+  it(
     "stays on the fallback without a reset time, until the provider setting is changed",
     withRoles(async (env) => {
       env.providers(BOTH);
