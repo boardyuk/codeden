@@ -192,4 +192,8 @@ describe("inlineCodePaths", () => {
     expect(inlineCodePaths(`print(p := '/x')`)).toEqual(["/x"]);
     expect(inlineCodePaths(`puts("#{File.read('/x')}")`)).toContain("/x");
   });
+
+  it("reads a long call that never closes without backtracking", () => {
+    expect(inlineCodePaths(`print(${"'a'  ".repeat(40)}`)).toHaveLength(40);
+  });
 });

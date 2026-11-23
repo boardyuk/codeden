@@ -131,7 +131,8 @@ const PLAIN = String.raw`[rbuRBU]{0,2}(?:"(?:\\.|[^"\\\n{])*"|'(?:\\.|[^'\\\n{])
  * stays.
  */
 const TEST_OR_PRINT = new RegExp(
-  String.raw`(?:\.(?:startsWith|endsWith|startswith|endswith|includes|indexOf)|\b(?:print|puts|console\.\w+))\s*\(\s*[([]?(?:\s*${PLAIN}\s*,?)*\s*[)\]]?\s*\)`,
+  // Each space is matched one way only, so text that doesn't match fails fast.
+  String.raw`(?:\.(?:startsWith|endsWith|startswith|endswith|includes|indexOf)|\b(?:print|puts|console\.\w+))\s*\(\s*(?:[([]\s*)?(?:${PLAIN}\s*(?:,\s*)?)*(?:[)\]]\s*)?\)`,
   "g",
 );
 /** Not a file: a URL, or text with a line break, a pipe or a quote in it. */
