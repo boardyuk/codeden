@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cutOffByStop } from "../src/process/cut-off";
 import { type ProcessRow, withDescendants } from "../src/process/inside";
+import { processesStillInside } from "../src/process/worktree-processes";
 import { stopWithLeftovers } from "../src/workspace/leftover-processes";
 import { setPlatform } from "./helpers";
 
@@ -126,5 +127,22 @@ describe("stopping a session on Windows (#608)", () => {
       }),
     );
     expect(ended()).toEqual([]);
+  });
+});
+
+describe("naming a process in a message or the log", () => {
+  it("names its program alone, never its arguments, which can hold secrets", async () => {
+    const script = join(WT_A, "server.js");
+    const rows = [
+      row(701, 1, { commandLine: `"${NODE}" ${script} --token=s3cret` }),
+      row(702, 1, { commandLine: `node ${script} --token=s3cret` }),
+      // A quote that doesn't close: where the program ends can't be told.
+      row(703, 1, { commandLine: `"${NODE} ${script} --token=s3cret` }),
+    ];
+    expect(await processesStillInside(WT_A, async () => rows)).toEqual([
+      "node.exe (701)",
+      "node (702)",
+      "? (703)",
+    ]);
   });
 });

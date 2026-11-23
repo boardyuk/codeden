@@ -342,13 +342,20 @@ const BUNDLE_PROGRAM = /^\/(?:[^\s"']|\s(?![/"']|-\S))*?\.app\/Contents\/MacOS\/
 /**
  * The program a process runs: its executable, else the command line's (quoted) first word. Only
  * the command line is known on macOS, so a line running a program from an app bundle, whose path
- * may have spaces, yields the bundle's `Contents/MacOS/` folder instead (`BUNDLE_PROGRAM`).
+ * may have spaces, yields the bundle's `Contents/MacOS/` folder instead (`BUNDLE_PROGRAM`). Never
+ * any of its arguments, since processes are named by it in the log and in messages: with a quote
+ * that doesn't close, where the program ends is unknown, so there is none.
  */
 export function programPath(row: ProcessRow): string | null {
   if (row.exe) return row.exe;
   const line = row.commandLine?.trim();
   if (!line) return null;
-  if (line.startsWith('"')) return line.slice(1, line.indexOf('"', 1));
+  if (line.startsWith('"')) {
+    const end = line.indexOf('"', 1);
+    if (end !== -1) return line.slice(1, end) || null;
+    const rest = line.slice(1);
+    return /\s/.test(rest) ? null : rest;
+  }
   return BUNDLE_PROGRAM.exec(line)?.[0] ?? line.split(/\s+/)[0] ?? null;
 }
 
