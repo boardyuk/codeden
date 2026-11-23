@@ -11,7 +11,7 @@ import {
   type SettingsInput,
 } from "@codeden/contracts";
 import { vi } from "vitest";
-import { openDatabase } from "../../src/db/client";
+import { type Db, openDatabase } from "../../src/db/client";
 import { EventStore } from "../../src/events/store";
 import { InboxService } from "../../src/services/inbox-service";
 import { PmAsks } from "../../src/services/orchestration/asks";
@@ -29,6 +29,8 @@ const info = (id: string): ProviderInfo =>
   ({ id, displayName: id, models: [], capabilities: {} }) as unknown as ProviderInfo;
 
 export interface RoleEnv {
+  db: Db;
+  store: EventStore;
   roles: RoleSessions;
   repo: SessionRepo;
   sessions: SessionService;
@@ -51,6 +53,8 @@ export interface RoleEnv {
   turn(id: string, turnId: string, input: string, reply: string): void;
   /** Ids the runner was asked to stop, in order. */
   stopped: string[];
+  /** Every command the runner got, as `<name> <sessionId>`, in order. */
+  commands: string[];
   /** Hold the runner's answer to the nth `session.stop` (from 1) until the promise settles. */
   holdStop(nth: number, until: Promise<void>): void;
   /** The runner's link: while false its providers can't be checked. */
@@ -86,6 +90,7 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
       let settings = Settings.parse({});
       let connected = true;
       const stopped: string[] = [];
+      const commands: string[] = [];
       const holds = new Map<number, Promise<void>>();
       const logged: string[] = [];
       const project = {
@@ -102,6 +107,7 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
         providers: () => [info("claude"), info("codex")],
         isConnected: () => connected,
         request: vi.fn(async (command: { name: string; sessionId: string }) => {
+          commands.push(`${command.name} ${command.sessionId}`);
           if (command.name !== "session.stop") return;
           stopped.push(command.sessionId);
           await holds.get(stopped.length);
@@ -139,6 +145,8 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
       const append = (id: string, event: AgentEvent) =>
         store.append([agentEventToNewEvent(id, event)]);
       await run({
+        db: database.db,
+        store,
         roles,
         repo,
         sessions,
@@ -184,6 +192,7 @@ export function withRoles(run: (env: RoleEnv) => Promise<void>) {
           append(id, { type: "turn.completed", ...at });
         },
         stopped,
+        commands,
         holdStop: (nth, until) => holds.set(nth, until),
         connected: (value) => {
           connected = value;

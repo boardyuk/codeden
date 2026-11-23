@@ -11,15 +11,19 @@ import type { Db } from "../../db/client";
 import { rowToSession } from "../../db/rows";
 import { sessions } from "../../db/schema";
 import type { SettingsStore } from "../../settings-store";
-import { ServiceError } from "../errors";
+import { conflict, ServiceError } from "../errors";
 import type { InboxService } from "../inbox-service";
 import { projectDefaultProvider } from "../projects/project-config";
 import type { ProjectService } from "../projects/project-service";
 import type { RunnerPort } from "../runner-port";
 import type { SessionRepo, StoredStartMeta } from "../sessions/repo";
 import type { SessionService } from "../sessions/session-service";
+import { freshRefusal, isOpenRequest } from "./role-fresh";
 
 export type OrchestrationRole = "orchestrator" | "pm";
+
+/** Why a role's session is replaced: its provider setting moved, or a person started fresh. */
+type ReplaceReason = "moved" | "fresh";
 
 const EMPTY_META: StoredStartMeta = {
   workspaceMode: "repo_root",
@@ -41,6 +45,8 @@ const keyOf = (role: OrchestrationRole, projectId: string | null) => `${role}:${
  * runs on, that session is retired (stopped and archived, its transcript kept) once no turn is
  * running, and the next use of the role starts a new one on the chosen provider. Messages
  * waiting in the retired session's queue move to the new one, which is then started at once.
+ * A person can also start the role over ("Start fresh", `startFresh`): the same change, with
+ * the new session started at once. A retired session stays archived and read-only.
  */
 export class RoleSessions {
   /** The change of a role's session under way (retire, create or both), by role key. */
@@ -169,14 +175,14 @@ export class RoleSessions {
    * Retire a role session (stop and archive it, its transcript kept) and return the messages
    * that were waiting in its queue, which move to the role's new session. Its open approvals
    * and questions are dismissed, as stopping any session does. Its open failed runs are
-   * dismissed too: their Retry messages the session, which would bring the retired
-   * conversation back on the old provider.
+   * dismissed too: their Retry would message the retired conversation, which stays archived.
    */
-  private async retire(session: Session): Promise<QueuedMessage[]> {
+  private async retire(session: Session, why: ReplaceReason): Promise<QueuedMessage[]> {
     const queued = await this.deps.sessions.stopKeepingQueue(session.id);
+    const reason = why === "fresh" ? "started fresh" : "moved to another provider";
     for (const item of this.deps.inbox.list({ sessionId: session.id })) {
       if (item.kind !== "run_failed") continue;
-      this.deps.inbox.close(item, "dismissed", { reason: "moved to another provider" });
+      this.deps.inbox.close(item, "dismissed", { reason });
     }
     this.deps.repo.update(session.id, (s) =>
       s.archivedAt ? s : { ...s, archivedAt: new Date().toISOString() },
@@ -191,23 +197,25 @@ export class RoleSessions {
    * started until its next message or wake.
    *
    * If the new session can't be started, the messages go back to the old one, which stays the
-   * role's session: nothing queued is lost, and the move is tried again on the next use.
+   * role's session: nothing queued is lost, and the move is tried again on the next use. A
+   * fresh start (`why` "fresh") that can't begin always leaves the old session as it was.
    */
   private async replace(
     existing: Session | undefined,
     role: OrchestrationRole,
     projectId: string | null,
     always: boolean,
+    why: ReplaceReason = "moved",
   ): Promise<Session | undefined> {
     const key = keyOf(role, projectId);
-    const queued = existing ? await this.retire(existing) : [];
+    const queued = existing ? await this.retire(existing, why) : [];
     if (existing) this.retired.set(key, existing);
     if (!always && queued.length === 0) return undefined;
     let created: Session;
     try {
       created = await this.create(role, projectId);
     } catch (error) {
-      if (existing && queued.length > 0) {
+      if (existing && (queued.length > 0 || why === "fresh")) {
         this.deps.repo.update(existing.id, (s) => ({ ...s, archivedAt: null }));
         this.deps.sessions.restoreQueued(queued);
         this.retired.delete(key);
@@ -299,6 +307,41 @@ export class RoleSessions {
       );
       if (session) return session;
     }
+  }
+
+  /**
+   * "Start fresh" (§8.1, a person's action): archive the role's current session (stopped, its
+   * transcript kept, read-only) and start a new one under the same work key, on the provider
+   * and model the settings name. It is the same single change as a provider move (`replace`),
+   * so a message or wake meanwhile waits for it and gets the new session; messages waiting in
+   * the old session's queue move over. Refused while a turn runs or a question or approval is
+   * open (`freshRefusal`), and when `sessionId` is no longer the role's current session (a
+   * second click, or the role changed meanwhile).
+   */
+  async startFresh(
+    role: OrchestrationRole,
+    projectId: string | null,
+    sessionId: string,
+  ): Promise<{ session: Session; archived: Session }> {
+    const key = keyOf(role, projectId);
+    const name = role === "pm" ? "PM" : "orchestrator";
+    if (this.changing.has(key)) {
+      throw conflict(`The ${name}'s session is changing right now. Try again in a moment.`);
+    }
+    const existing = this.find(role, projectId);
+    if (!existing || existing.id !== sessionId) {
+      throw conflict(`This is no longer the ${name}'s current conversation`, "not_current");
+    }
+    const refusal = freshRefusal(existing, {
+      delivering: this.deps.sessions.isDelivering(existing.id),
+      openRequests: this.deps.inbox.list({ sessionId: existing.id }).filter(isOpenRequest).length,
+    });
+    if (refusal) throw refusal;
+    const session = await this.exclusive(key, () =>
+      this.replace(existing, role, projectId, true, "fresh"),
+    );
+    if (!session) throw new ServiceError(500, "role_session_missing", "Role session vanished");
+    return { session, archived: this.deps.repo.get(existing.id) };
   }
 
   private async create(role: OrchestrationRole, projectId: string | null): Promise<Session> {
