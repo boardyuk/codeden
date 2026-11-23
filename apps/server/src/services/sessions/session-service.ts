@@ -655,9 +655,15 @@ export class SessionService {
     });
   }
 
-  /** Input handed to the runner: artifacts resolved to the file paths providers read. */
+  /**
+   * Input handed to the runner: artifacts resolved to the file paths providers read, only the
+   * session's own (and its project's shared ones, from a conflicting start).
+   */
   private forRunner(session: Session, input: UserInput): UserInput {
-    return this.deps.artifacts.resolveAttachments(this.externalize(session, input));
+    return this.deps.artifacts.resolveAttachments(this.externalize(session, input), {
+      sessionId: session.id,
+      projectId: session.projectId,
+    });
   }
 
   private launchInBackground(

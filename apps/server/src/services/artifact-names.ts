@@ -5,8 +5,12 @@
  */
 const UNSAFE = /[<>:"/\\|?*\p{Cc}؜‎‏‪-‮⁦-⁩]/gu;
 
-/** Device names Windows reserves, with or without an extension (`CON`, `nul.txt`, `COM1.log`). */
-const RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(\.|$)/i;
+/**
+ * Device names Windows reserves, with or without an extension (`CON`, `nul.txt`, `COM1.log`),
+ * also with spaces before the dot (`CON .txt`, which Windows reads as `CON`), and the console
+ * names `CONIN$` and `CONOUT$`.
+ */
+const RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$) *(\.|$)/i;
 
 /** Longest stored name in UTF-8 bytes: well under the usual 255, leaving room for the path. */
 const MAX_NAME_BYTES = 120;

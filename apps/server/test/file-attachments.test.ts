@@ -63,7 +63,7 @@ describe("file attachments with their bytes", () => {
     expect(JSON.stringify(stored)).not.toContain(b64("%PDF"));
     expect(JSON.stringify(stored)).not.toContain(dir.replace(/\\/g, "\\\\"));
 
-    const forRunner = fileAt(artifacts.resolveAttachments(stored));
+    const forRunner = fileAt(artifacts.resolveAttachments(stored, owner));
     expect(forRunner.source).toBeUndefined();
     expect(forRunner.name).toBe("отчёт 報告.pdf");
     expect(basename(forRunner.path)).toBe("отчёт 報告.pdf");
@@ -80,7 +80,7 @@ describe("file attachments with their bytes", () => {
       attachments: [uploaded("../../secret.txt", "harmless", secret)],
     };
     const stored = artifacts.externalizeAttachments(sent, owner);
-    const forRunner = fileAt(artifacts.resolveAttachments(stored));
+    const forRunner = fileAt(artifacts.resolveAttachments(stored, owner));
     expect(forRunner.path).not.toBe(secret);
     expect(forRunner.path.startsWith(artifacts.sessionDir("s1"))).toBe(true);
     expect(basename(forRunner.path)).toBe("secret.txt");
@@ -91,7 +91,7 @@ describe("file attachments with their bytes", () => {
   it("maps the path the provider echoes back to the artifact, never a path to the browser", () => {
     const sent: UserInput = { text: "x", attachments: [uploaded("notes.md", "# hi")] };
     const stored = artifacts.externalizeAttachments(sent, owner);
-    const resolved = artifacts.resolveAttachments(stored);
+    const resolved = artifacts.resolveAttachments(stored, owner);
     expect(clientInput(resolved, artifacts)).toEqual(stored);
 
     const other: UserInput = {
@@ -118,8 +118,32 @@ describe("file attachments with their bytes", () => {
   it("keeps old messages with a bare path as they are", () => {
     const legacy: UserInput = { text: "x", attachments: [{ type: "file", path: "report.pdf" }] };
     expect(artifacts.externalizeAttachments(legacy, owner)).toBe(legacy);
-    expect(artifacts.resolveAttachments(legacy)).toBe(legacy);
+    expect(artifacts.resolveAttachments(legacy, owner)).toBe(legacy);
     expect(clientInput(legacy, artifacts)).toBe(legacy);
+  });
+
+  it("resolves only the session's own artifacts and its project's shared ones", () => {
+    const mine = artifacts.externalizeAttachments(
+      { text: "x", attachments: [uploaded("mine.txt", "s1 only")] },
+      owner,
+    );
+    expect(() => artifacts.resolveAttachments(mine, { sessionId: "s2", projectId: null })).toThrow(
+      /No artifact/,
+    );
+    // A conflicting start's files sit in `shared/`, for the session that start becomes.
+    const shared = artifacts.externalizeAttachments(
+      { text: "x", attachments: [uploaded("spec.txt", "shared")] },
+      { sessionId: null, projectId: "p1" },
+    );
+    const started = fileAt(
+      artifacts.resolveAttachments(shared, { sessionId: "s3", projectId: "p1" }),
+    );
+    expect(readFileSync(started.path, "utf8")).toBe("shared");
+    for (const other of ["p2", null]) {
+      expect(() =>
+        artifacts.resolveAttachments(shared, { sessionId: "s3", projectId: other }),
+      ).toThrow(/No artifact/);
+    }
   });
 
   it("refuses a file over 20 MB", () => {
@@ -149,6 +173,8 @@ describe("safeFileName", () => {
     expect(safeFileName("CON")).toBe("_CON");
     expect(safeFileName("nul.txt")).toBe("_nul.txt");
     expect(safeFileName("com1.log")).toBe("_com1.log");
+    expect(safeFileName("aux .txt")).toBe("_aux .txt");
+    expect(safeFileName("CONOUT$")).toBe("_CONOUT$");
     expect(safeFileName("console.log")).toBe("console.log");
   });
 

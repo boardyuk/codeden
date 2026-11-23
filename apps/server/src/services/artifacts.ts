@@ -215,13 +215,25 @@ export class ArtifactService {
    * Point artifact attachments at their file, for the runner: providers read images and files
    * by path, so a file's `path` becomes the stored file's absolute path and its `source` goes.
    * Only call this on input that goes to the runner, never on what the browser sees.
+   *
+   * Only `owner`'s own artifacts resolve, and shared ones (a conflicting start's, `shared/`) of
+   * its project: a message can't hand an agent another session's file. Any other id is refused
+   * as unknown, so the reply doesn't tell whether it exists.
    */
-  resolveAttachments(input: UserInput): UserInput {
+  resolveAttachments(
+    input: UserInput,
+    owner: { sessionId: string; projectId: string | null },
+  ): UserInput {
     if (!input.attachments.some(hasArtifact)) return input;
     const attachments = input.attachments.map((a): Attachment => {
       if (a.source?.type !== "artifact") return a;
       const artifact = this.find(a.source.artifactId);
-      if (!artifact) throw badRequest(`No artifact ${a.source.artifactId}`, "unknown_artifact");
+      const owned =
+        artifact?.sessionId === owner.sessionId ||
+        (artifact?.sessionId === null && artifact.projectId === owner.projectId);
+      if (!artifact || !owned) {
+        throw badRequest(`No artifact ${a.source.artifactId}`, "unknown_artifact");
+      }
       const path = this.filePath(artifact);
       if (a.type === "image") return { ...a, source: { type: "path" as const, path } };
       const { source: _stored, ...file } = a;
