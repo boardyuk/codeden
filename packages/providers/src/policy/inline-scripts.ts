@@ -5,8 +5,9 @@ import { type StartedProcess, startedProcesses } from "./start-process";
 /**
  * Command lines that another command runs (§11.2): a shell's inline script (`bash -c "…"`,
  * `pwsh -Command …`, `cmd /c …`), the commands of cmd's `for` loop (#499) and the program
- * `Start-Process` starts (#541, `./start-process`), with the script of a shell it starts (#550).
- * The risk classifier parses each one and classifies it like a command line of its own.
+ * `Start-Process` starts (#541, `./start-process`), with the script of a shell it starts (#550),
+ * and the string `eval`, `Invoke-Expression` or `iex` runs. The risk classifier parses each one
+ * and classifies it like a command line of its own.
  */
 
 export interface InlineScript {
@@ -22,12 +23,36 @@ export interface InlineScript {
   dir?: string;
   /** True when it runs elevated (`Start-Process -Verb RunAs`). */
   elevated?: boolean;
+  /**
+   * True when it isn't all written out: `eval "$CMD"`, `iex $x`, `iex (Get-Content x)`, or what a
+   * pipe hands `iex`. What runs is only known when it runs, so it asks unless what is written
+   * only reads.
+   */
+  dynamic?: boolean;
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"]);
 
-/** The command lines `bin` runs, given the words after it; `cmd`: the command they are from. */
-export function inlineScripts(bin: string, args: string[], cmd: SimpleCommand): InlineScript[] {
+const EVALS = new Set(["iex", "invoke-expression"]);
+/** Text a shell fills in when it runs: a variable or a substitution. */
+const EXPANDS = /[$`]/;
+
+/**
+ * The command lines `bin` runs, given the words after it; `cmd`: the command they are from, and
+ * `source`: the command at the head of the pipeline it reads, if any.
+ */
+export function inlineScripts(
+  bin: string,
+  args: string[],
+  cmd: SimpleCommand,
+  source?: SimpleCommand,
+): InlineScript[] {
+  if (bin === "eval") {
+    const text = args.join(" ");
+    const dynamic = EXPANDS.test(text) || cmd.nested.length > 0;
+    return text.trim() ? [{ text, dialect: "posix", dynamic }] : [];
+  }
+  if (EVALS.has(bin)) return evaluated(args, cmd, source);
   const flag = scriptFlag(bin, args);
   if (SHELLS.has(bin)) {
     const text = flag >= 0 ? args.slice(flag + 1).find((a) => !a.startsWith("-")) : undefined;
@@ -54,6 +79,20 @@ export function scriptFlag(bin: string, args: readonly string[]): number {
     return args.findIndex((a) => /^-(c|command)$/i.test(a));
   if (bin === "cmd") return args.findIndex((a) => /^\/\/?[ck]$/i.test(a));
   return -1;
+}
+
+/**
+ * The string `Invoke-Expression` runs: its words (after `-Command`), or the one string a pipe
+ * hands it (`'Remove-Item x' | iex`). Anything else a pipe hands it is only known when it runs.
+ */
+function evaluated(args: string[], cmd: SimpleCommand, source?: SimpleCommand): InlineScript[] {
+  const words = args.filter((a) => !/^-(c|co|com|comm|comma|comman|command)$/i.test(a));
+  const piped = words.length === 0 && cmd.piped === true;
+  const literal = piped && source?.words.length === 1 && source.nested.length === 0;
+  const text = literal ? (source.words[0] as string) : words.join(" ");
+  if (!text.trim() && !piped) return [];
+  const dynamic = (piped && !literal) || EXPANDS.test(text) || (!piped && cmd.nested.length > 0);
+  return [{ text, dialect: "powershell", dynamic }];
 }
 
 /**

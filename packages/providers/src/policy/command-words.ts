@@ -1,7 +1,14 @@
+import { elevates, wrappedCommand } from "./wrappers";
+
 /** Helpers for reading the words of a parsed simple command (§11.2). */
 
 /** Shell keywords that start a compound command (`if`, `then`, `do`, `{`, ...). */
-const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "time", "!", "{"]);
+const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{"]);
+
+/** The header of a POSIX function definition: `f()` or `f(){`, before its body. */
+const FUNCTION_HEADER = /^[A-Za-z_][\w-]*\(\)\{?$/;
+/** A `case` pattern before its commands: `*.txt)`, with no `(` of its own. */
+const CASE_PATTERN = /^[^()]+\)$/;
 
 /** A shell variable assignment (`NAME=value`). */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -17,16 +24,19 @@ export interface Unwrapped {
   /** The program and its arguments. */
   tokens: string[];
   elevated: boolean;
-  /** The folders `env -C dir` (`--chdir`) moves into before running it, in order. */
+  /** The folders `env -C dir` or `sudo -D dir` (`--chdir`) moves into before running it, in order. */
   chdir: string[];
   /** The variable assignments before it (`GIT_DIR=x git …`, `env GIT_DIR=x git …`). */
   assigns: string[];
 }
 
 /**
- * Words that don't change what runs: elevation (`sudo`), wrappers (`env -u X Y=1`, `command`,
- * `builtin`, `exec`), shell keywords that start a compound command (`if`, `then`, `do`, `{`, ...) and cmd's
- * `@`. `env` with no command to run prints the environment, so it stays the program then.
+ * Words that don't change what runs: elevation and wrappers with their own options (`sudo -u x`,
+ * `timeout 9`, `nice -n 5`, `command`, `exec`, `busybox`; `./wrappers`), `env -u X Y=1`, shell
+ * keywords that start a compound command (`if`, `then`, `do`, `{`, ...), the header of a function
+ * definition (`f() {`, `function f {`: its body is judged where it is written), a `case` and its
+ * patterns, and cmd's `@`. `env` with no command to run prints the environment, so it stays the
+ * program then.
  */
 export function unwrap(words: string[]): Unwrapped {
   let elevated = false;
@@ -35,17 +45,25 @@ export function unwrap(words: string[]): Unwrapped {
   const assigns: string[] = [];
   for (;;) {
     const head = rest[0]?.toLowerCase();
-    if (head === "sudo" || head === "doas" || head === "runas" || head === "gsudo") {
-      elevated = true;
-      rest = rest.slice(1).filter((t, i) => !(i === 0 && t.startsWith("-")));
-    } else if (binName(head) === "env") {
+    const bin = binName(head);
+    const wrapped = head ? wrappedCommand(bin, rest.slice(1), chdir) : undefined;
+    if (wrapped && (wrapped.length > 0 || elevates(bin))) {
+      elevated ||= elevates(bin);
+      rest = wrapped;
+    } else if (bin === "env") {
       // Also `/usr/bin/env node x.js` and `env.exe …`.
       const command = envCommand(rest.slice(1), chdir);
       if (command.every((w) => ASSIGNMENT.test(w))) break;
       rest = command;
-    } else if (head === "command" || head === "builtin" || head === "exec" || head === "nohup") {
-      rest = rest.slice(1);
     } else if (head && KEYWORDS.has(head)) {
+      rest = rest.slice(1);
+    } else if (head === "function" && rest.length > 1) {
+      rest = rest.slice(rest[2] === "()" ? 3 : 2);
+    } else if (head && FUNCTION_HEADER.test(head)) {
+      rest = rest.slice(1);
+    } else if (head === "case" && rest.some((w) => w.toLowerCase() === "in")) {
+      rest = rest.slice(rest.findIndex((w) => w.toLowerCase() === "in") + 1);
+    } else if (head && rest.length > 1 && CASE_PATTERN.test(head)) {
       rest = rest.slice(1);
     } else if (head && ASSIGNMENT.test(head)) {
       assigns.push(rest[0] as string);

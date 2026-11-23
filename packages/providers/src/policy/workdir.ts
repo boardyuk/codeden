@@ -141,7 +141,8 @@ function readsOnly(line: string, dialect: ShellDialect, depth: number): boolean 
   const list = parseShell(line, dialect);
   const cmd = list[0];
   if (list.length !== 1 || !cmd) return false;
-  if (cmd.nested.length > 0 || cmd.reads?.length || cmd.input?.length) return false;
+  if (cmd.nested.length > 0 || cmd.blocks?.length || cmd.reads?.length) return false;
+  if (cmd.input?.length) return false;
   if (cmd.writes.some((target) => !DISCARD.test(target))) return false;
   const [first, ...args] = cmd.words;
   const bin = binName(first);
