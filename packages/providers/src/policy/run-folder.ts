@@ -1,10 +1,10 @@
 import { mostSevere, type RiskAssessment } from "./assessment";
 import { binName, CD, unwrap } from "./command-words";
-import { findPaths } from "./deletes";
 import { moveTo } from "./locations";
 import { isUnknownDir, type PathContext, pathApi } from "./paths";
 import { programDenial } from "./read-only";
 import { matchesLong } from "./read-only-options";
+import { findPaths } from "./search-runs";
 import type { SimpleCommand } from "./shell";
 import { runsInRisk } from "./workdir";
 

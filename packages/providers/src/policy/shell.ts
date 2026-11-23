@@ -1,12 +1,18 @@
 import { assignsAt, itemsIn, variableItem } from "./ps-variables";
-import { Builder, type ShellDialect, type SimpleCommand } from "./shell-builder";
+import {
+  Builder,
+  type PendingHeredoc,
+  type ShellDialect,
+  type SimpleCommand,
+} from "./shell-builder";
 import { decodeAnsiC, type EscapeMode, readsPosix } from "./shell-escapes";
 
 /**
  * A small shell lexer for the risk classifier (§11.2). It splits a command line into simple
  * commands the way a shell would, so quoted text, heredoc bodies and PowerShell here-strings
  * stay data instead of being read as commands, and output redirections are only found
- * outside quotes. It covers POSIX shells and PowerShell well enough to classify commands;
+ * outside quotes. A heredoc's body is kept with the command that reads it, and the substitutions
+ * an unquoted one runs (`$(…)`, backticks) are read as that command's. It covers POSIX shells and PowerShell well enough to classify commands;
  * it is not a full parser. The command being built is `./shell-builder`'s; how escapes are read,
  * `./shell-escapes`'.
  */
@@ -95,6 +101,7 @@ class Lexer {
         // Bash's `$'…'`: a string with C escapes (`$'\x2e\x2e'` is `..`).
         b.add(decodeAnsiC(this.readAnsi()));
       } else if (c === "'" || c === '"') {
+        b.quotes();
         if (b.inWord && b.word.endsWith("@") && this.lineEndsAt(this.i + 1)) {
           const body = this.skipHereString(c);
           // `@"…"@` expands its variables; `@'…'@` doesn't.
@@ -127,7 +134,9 @@ class Lexer {
         const start = this.i;
         this.i += 1;
         b.cmd.nested.push(this.list(")"));
-        b.add(src.slice(start, this.i));
+        const group = src.slice(start, this.i);
+        if (this.dialect !== "posix" && group.includes("$")) b.expands();
+        b.add(group);
       } else if (c === "," && this.dialect !== "posix") {
         // PowerShell passes `a,b` as a list of two paths; a POSIX shell, as one name.
         b.addComma();
@@ -136,6 +145,7 @@ class Lexer {
         b.add(this.braced(b, false));
       } else {
         if (c === "{") this.block(b);
+        if (c === "$") b.expands();
         b.add(c);
         this.i += 1;
       }
@@ -199,6 +209,7 @@ class Lexer {
         this.i += 2;
         b.heredocStrip = src[this.i] === "-";
         if (b.heredocStrip) this.i += 1;
+        b.heredocQuoted = /^[ \t]*[^\s'"\\]*['"\\]/.test(src.slice(this.i, this.i + 80));
         b.target = "heredoc";
       } else {
         // Input redirect: the file stays an argument, so secrets checks still see it.
@@ -281,10 +292,12 @@ class Lexer {
         const start = this.i;
         this.i += 2;
         b.cmd.nested.push(this.list(")"));
+        b.expands();
         text += src.slice(start, this.i);
       } else if (c === "$" && next === "{" && this.dialect !== "posix") {
         text += this.braced(b, true);
       } else {
+        if (c === "$") b.expands();
         text += c;
         this.i += 1;
       }
@@ -301,6 +314,7 @@ class Lexer {
   private braced(b: Builder, quoted: boolean): string {
     const { src } = this;
     const start = this.i;
+    b.expands();
     if (this.dialect !== "powershell") {
       BRACED_NAME.lastIndex = start;
       const m = BRACED_NAME.exec(src);
@@ -345,10 +359,14 @@ class Lexer {
     return this.src.slice(from, m ? m.index : this.src.length);
   }
 
-  /** Skip the bodies of heredocs opened on the line that just ended. */
-  private skipHeredocs(pending: Array<{ delim: string; strip: boolean }>): void {
+  /**
+   * Skip the bodies of heredocs opened on the line that just ended. Each is kept with the command
+   * that reads it; the substitutions an unquoted one runs are that command's.
+   */
+  private skipHeredocs(pending: PendingHeredoc[]): void {
     const { src } = this;
-    for (const { delim, strip } of pending) {
+    for (const { delim, strip, quoted, owner } of pending) {
+      const lines: string[] = [];
       while (this.i < src.length) {
         const nl = src.indexOf("\n", this.i);
         const end = nl === -1 ? src.length : nl;
@@ -356,7 +374,24 @@ class Lexer {
         if (strip) line = line.replace(/^\t+/, "");
         this.i = nl === -1 ? src.length : nl + 1;
         if (line === delim) break;
+        lines.push(line);
       }
+      const body = lines.join("\n");
+      owner.heredocs = [...(owner.heredocs ?? []), { body, quoted }];
+      if (!quoted) owner.nested.push(...new Lexer(body, this.dialect, this.escapes).ran());
     }
+  }
+
+  /** The command lists the substitutions of an unquoted heredoc body run: `$(…)` and backticks. */
+  ran(): SimpleCommand[][] {
+    const { src } = this;
+    const out: SimpleCommand[][] = [];
+    while (this.i < src.length) {
+      const c = src[this.i];
+      const open = c === "$" && src[this.i + 1] === "(" ? ")" : c === "`" ? "`" : undefined;
+      this.i += open === ")" || c === "\\" ? 2 : 1;
+      if (open) out.push(this.list(open));
+    }
+    return out;
   }
 }

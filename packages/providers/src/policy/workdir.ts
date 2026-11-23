@@ -150,7 +150,7 @@ function readsOnly(line: string, dialect: ShellDialect, depth: number): boolean 
   const scripts = inlineScripts(bin, args, cmd);
   return (
     scripts.length > 0 &&
-    scripts.every((script) => readsOnly(script.text, script.dialect, depth + 1))
+    scripts.every((s) => !s.dynamic && !s.commands && readsOnly(s.text, s.dialect, depth + 1))
   );
 }
 

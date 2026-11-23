@@ -1,6 +1,8 @@
 import { isWin, type PathContext } from "./paths";
 import { parseShell, type ShellDialect, type SimpleCommand } from "./shell";
+import type { Scope } from "./shell-builder";
 import type { EscapeMode } from "./shell-escapes";
+import { resolveVariables } from "./variables";
 
 /**
  * The ways a command line may be read (§11.2), by how its shell reads escapes (`./shell-escapes`).
@@ -13,13 +15,19 @@ import type { EscapeMode } from "./shell-escapes";
  * - A shell that isn't known: as written, as PowerShell and cmd read it, and the POSIX way. On
  *   Windows the POSIX reading is the careful one, which leaves ordinary Windows paths alone, and
  *   cmd's `^` escapes are read too.
+ *
+ * In each reading, the variables the command line sets are filled in where it uses them
+ * (`./variables`). `scope`: the ones set before it, for a script that runs in the same shell.
  */
 export function shellReadings(
   src: string,
   dialect: ShellDialect,
   ctx: PathContext,
+  scope?: Scope,
 ): SimpleCommand[][] {
-  return escapeModes(src, dialect, isWin(ctx)).map((mode) => parseShell(src, dialect, mode));
+  return escapeModes(src, dialect, isWin(ctx)).map((mode) =>
+    resolveVariables(parseShell(src, dialect, mode), new Map(scope)),
+  );
 }
 
 function escapeModes(src: string, dialect: ShellDialect, win: boolean): EscapeMode[] {

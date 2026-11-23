@@ -138,7 +138,7 @@ export function itemWrites(
     isScriptBlock(w) ? scriptBlockWords(w).filter((b) => !b.startsWith("-")) : wordPaths(cmd, w),
   );
   if ((paths.length === 0 || words.some(isScriptBlock)) && cmdlet.here) {
-    paths = [...paths, ...(source ? listedPaths(source) : ["."])];
+    paths = [...paths, ...(source ? listedPaths(source, ctx) : ["."])];
   }
   const name = cmdlet.creates ? valuesOf(named, "name")[0] : undefined;
   let targets = name ? paths.map((p) => `${p.replace(/[\\/]+$/, "")}\\${name}`) : paths;

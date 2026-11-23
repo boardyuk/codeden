@@ -18,6 +18,10 @@ interface WrapperSpec {
   describes?: string;
   /** Options start with `/` (Windows' `runas /user:x`). */
   slash?: boolean;
+  /** Its words are one command line, which it hands a shell (`watch 'rm -rf x'`). */
+  shell?: boolean;
+  /** The option whose value is a command line for a shell (`su -c '…'`, `flock file -c '…'`). */
+  command?: { short: string; long: string };
 }
 
 const SUDO: WrapperSpec = {
@@ -46,6 +50,12 @@ const ELEVATORS = new Map<string, WrapperSpec>(
     doas: { short: "uC" },
     pkexec: { long: ["--user"] },
     runas: { slash: true },
+    // `su [options] [-] [user]`: only `-c` gives it a command.
+    su: {
+      short: "gGsw",
+      long: ["--group", "--supp-group", "--shell", "--whitelist-environment"],
+      command: { short: "c", long: "--command" },
+    },
   }),
 );
 
@@ -65,8 +75,26 @@ const WRAPPERS = new Map<string, WrapperSpec>(
     // The first word is the applet: `busybox rm -rf x`.
     busybox: {},
     toybox: {},
+    // `shx rm -rf x` runs the shell command it names.
+    shx: {},
+    unbuffer: {},
+    // `flock [options] file command…`, or `flock file -c 'command line'`.
+    flock: {
+      short: "wE",
+      long: ["--wait", "--timeout", "--conflict-exit-code"],
+      operands: 1,
+      command: { short: "c", long: "--command" },
+    },
+    chroot: { long: ["--userspec", "--groups"], operands: 1 },
+    strace: { short: "abeEIoOpPsSuUX", long: ["--output", "--trace", "--attach", "--user"] },
+    ltrace: { short: "aAbeDlnopsux", long: ["--output"] },
+    watch: { short: "n", long: ["--interval"], shell: true },
+    taskset: { short: "c", long: ["--cpu-list"] },
   }),
 );
+
+/** `sh -c` given `line`, as the wrappers that hand a shell one command line run it. */
+const inShell = (line: string): string[] => ["sh", "-c", line];
 
 /** True for a program that runs a command with other privileges (`sudo`, `doas`, `runas`). */
 export const elevates = (bin: string): boolean => ELEVATORS.has(bin);
@@ -79,6 +107,15 @@ export const elevates = (bin: string): boolean => ELEVATORS.has(bin);
 export function wrappedCommand(bin: string, args: string[], chdir: string[]): string[] | undefined {
   const spec = ELEVATORS.get(bin) ?? WRAPPERS.get(bin);
   if (!spec) return undefined;
+  if (spec.command) {
+    const { short, long } = spec.command;
+    const at = args.findIndex((a) => a === `-${short}` || a === long || a.startsWith(`${long}=`));
+    const arg = args[at] ?? "";
+    const given = arg.includes("=") ? arg.slice(long.length + 1) : args[at + 1];
+    if (at >= 0 && given !== undefined) return inShell(given);
+  }
+  // `taskset -c 0,1 command`: the list of CPUs is the option's value, and no mask follows.
+  let operands = spec.operands ?? (bin === "taskset" ? 1 : 0);
   let i = 0;
   for (; i < args.length; i += 1) {
     const arg = args[i] as string;
@@ -93,6 +130,7 @@ export function wrappedCommand(bin: string, args: string[], chdir: string[]): st
       const takes = spec.long?.includes(name) === true;
       const given = value.length > 0 ? value.join("=") : takes ? args[++i] : undefined;
       if (name === spec.chdir?.long && given !== undefined) chdir.push(given);
+      if (bin === "taskset" && takes) operands = 0;
       continue;
     }
     // `nice -10`: a number, not a cluster of options.
@@ -103,6 +141,8 @@ export function wrappedCommand(bin: string, args: string[], chdir: string[]): st
     if (at < 0) continue;
     const given = arg.slice(at + 2) || args[++i];
     if (letters[at] === spec.chdir?.short && given !== undefined) chdir.push(given);
+    if (bin === "taskset") operands = 0;
   }
-  return args.slice(i + (spec.operands ?? 0));
+  const rest = args.slice(i + operands);
+  return spec.shell && rest.length > 0 ? inShell(rest.join(" ")) : rest;
 }

@@ -1,5 +1,6 @@
 import { binName } from "./command-words";
 import type { ShellDialect, SimpleCommand } from "./shell";
+import type { Scope } from "./shell-builder";
 import { type StartedProcess, startedProcesses } from "./start-process";
 
 /**
@@ -29,6 +30,13 @@ export interface InlineScript {
    * only reads.
    */
   dynamic?: boolean;
+  /** The variables set where it runs, when it runs in the shell that set them (`./variables`). */
+  scope?: Scope;
+  /**
+   * The commands it runs, when they are given as words and not as one line (`find -exec rm {} ;`,
+   * `npx rimraf x`): judged as they are, and `text` is not read.
+   */
+  commands?: SimpleCommand[];
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"]);
@@ -59,7 +67,9 @@ export function inlineScripts(
     return text ? [{ text, dialect: "posix" }] : [];
   }
   if (bin === "pwsh" || bin === "powershell") {
-    return flag >= 0 ? [{ text: args.slice(flag + 1).join(" "), dialect: "powershell" }] : [];
+    if (flag < 0) return [];
+    if (ENCODED.test(args[flag] as string)) return [decoded(args[flag + 1])];
+    return [{ text: args.slice(flag + 1).join(" "), dialect: "powershell" }];
   }
   if (bin === "cmd") {
     if (flag < 0) return [];
@@ -69,14 +79,33 @@ export function inlineScripts(
   return startedProcesses(bin, args, cmd).flatMap((p) => [p, ...startedShell(p, cmd)]);
 }
 
+/** PowerShell's `-EncodedCommand`, or any prefix of it (`-e`, `-ec`, `-enc`). */
+const ENCODED =
+  /^-(?:ec|e(?:n(?:c(?:o(?:d(?:e(?:d(?:c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?)?)?)?)?)?)?)?)$/i;
+
 /**
- * The word a shell's inline script follows: `-c` (also within `-lc`), `-Command` or cmd's `/c`
- * and `/k` (Git Bash writes them `//c`, which its path conversion leaves alone); -1 for none.
+ * The script `-EncodedCommand` runs: base64 of UTF-16LE text. One that can't be decoded to text is
+ * only known when it runs.
+ */
+function decoded(value: string | undefined): InlineScript {
+  const unknown: InlineScript = { text: "", dialect: "powershell", dynamic: true };
+  if (!value || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return unknown;
+  const text = Buffer.from(value, "base64").toString("utf16le");
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: binary data is not a script.
+  return /[\u0000-\u0008\u000e-\u001f�]/.test(text)
+    ? unknown
+    : { ...unknown, text, dynamic: false };
+}
+
+/**
+ * The word a shell's inline script follows: `-c` (also within `-lc`), `-Command`,
+ * `-EncodedCommand` or cmd's `/c` and `/k` (Git Bash writes them `//c`, which its path conversion
+ * leaves alone); -1 for none.
  */
 export function scriptFlag(bin: string, args: readonly string[]): number {
   if (SHELLS.has(bin)) return args.findIndex((a) => /^-[a-z]*c[a-z]*$/i.test(a));
   if (bin === "pwsh" || bin === "powershell")
-    return args.findIndex((a) => /^-(c|command)$/i.test(a));
+    return args.findIndex((a) => /^-(c|command)$/i.test(a) || ENCODED.test(a));
   if (bin === "cmd") return args.findIndex((a) => /^\/\/?[ck]$/i.test(a));
   return -1;
 }

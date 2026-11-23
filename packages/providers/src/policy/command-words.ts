@@ -82,6 +82,17 @@ export function unwrap(words: string[]): Unwrapped {
   return { tokens: rest, elevated, chdir, assigns };
 }
 
+/**
+ * True when the next word after `words` names the program the command runs: nothing but wrappers,
+ * assignments and keywords came before it (`sudo -u root`, `timeout 9`, `X=1`), or `xargs`.
+ */
+export function atCommandWord(words: string[]): boolean {
+  const { tokens } = unwrap(words);
+  if (tokens.length === 0) return true;
+  const bin = binName(tokens[0]);
+  return bin === "xargs" || wrappedCommand(bin, tokens.slice(1), [])?.length === 0;
+}
+
 /** `env`'s short options that take a value: `-u NAME`, `-C DIR`, `-S STRING`, `-P PATH`, `-a ARG`. */
 const ENV_VALUE = "uCSPa";
 /** `env`'s long options that take a value. */

@@ -1,3 +1,4 @@
+import { atCommandWord } from "./command-words";
 import { dropAssignments } from "./ps-assignments";
 import { type EscapeMode, escapedWord } from "./shell-escapes";
 
@@ -31,6 +32,23 @@ export interface SimpleCommand {
   unparsed?: boolean;
   /** Here-string words (`<<< text`), which the command reads on its input. */
   input?: string[];
+  /**
+   * The bodies of its heredocs (`<<EOF`), which it reads on its input. `quoted`: the delimiter was
+   * quoted (`<<'EOF'`), so the shell expands nothing in the body.
+   */
+  heredocs?: Array<{ body: string; quoted: boolean }>;
+  /**
+   * The words and redirect targets that hold a `$` the shell expands (outside single quotes, not
+   * escaped): a variable, a parameter or a substitution. `./variables` fills in the ones the
+   * command line assigns.
+   */
+  vars?: Set<string>;
+  /** The words written with a quote, so they are text and not a command's name. */
+  quoted?: Set<string>;
+  /** The targets and operator of the PowerShell assignment `./ps-assignments` dropped (`$x = `). */
+  assignedTo?: string;
+  /** The variables the command line had set before this command (`./variables`). */
+  scope?: Scope;
   /** True when the command reads the output of the one before it (`a | b`, `a |& b`). */
   piped?: boolean;
   /**
@@ -44,6 +62,9 @@ export interface SimpleCommand {
    */
   assigned?: boolean;
 }
+
+/** Variables by name: the plain values each may hold, or null when one is only known at run time. */
+export type Scope = ReadonlyMap<string, readonly string[] | null>;
 
 /** What a word may stand for as paths, from `from` on (after an attached option, `-fFILE`). */
 export type WordPaths = (word: string, from: number) => string[];
@@ -65,6 +86,14 @@ export function wordPaths(cmd: SimpleCommand, word: string, from = 0): string[] 
 
 type Target = "word" | "write" | "heredoc" | "skip";
 
+/** A heredoc whose body follows the line: its delimiter, and the command that reads it. */
+export interface PendingHeredoc {
+  delim: string;
+  strip: boolean;
+  quoted: boolean;
+  owner: SimpleCommand;
+}
+
 /** The command being built and the word being read. */
 export class Builder {
   cmd: SimpleCommand = { words: [], writes: [], nested: [] };
@@ -74,7 +103,13 @@ export class Builder {
   /** Where the current word goes: an argument, a redirect target or a heredoc delimiter. */
   target: Target = "word";
   heredocStrip = false;
-  readonly heredocs: Array<{ delim: string; strip: boolean }> = [];
+  /** True when the heredoc's delimiter is quoted (`<<'EOF'`, `<<\EOF`). */
+  heredocQuoted = false;
+  readonly heredocs: PendingHeredoc[] = [];
+  /** True when the word holds a `$` the shell expands. */
+  private live = false;
+  /** True when a part of the word is in quotes. */
+  private quoted = false;
   /** The word with its backslash escapes taken out (`./shell-escapes`). */
   private plain = "";
   /** True when the word has a backslash escape. */
@@ -116,22 +151,49 @@ export class Builder {
     this.add(",");
   }
 
+  /** Note that the word holds a `$` the shell expands. */
+  expands(): void {
+    this.live = true;
+  }
+
+  /** Note that a part of the word is in quotes. */
+  quotes(): void {
+    this.quoted = true;
+  }
+
   /** Drop the word being read: a file descriptor before a redirect (`2>`). */
   dropWord(): void {
     this.word = "";
     this.plain = "";
     this.escaped = false;
     this.inWord = false;
+    this.live = false;
+    this.quoted = false;
   }
 
   endWord(): void {
     if (!this.inWord) return;
-    const text = this.escaped ? escapedWord(this.word, this.plain, this.escapes) : this.word;
+    // A program's name is read the POSIX way when that leaves a plain name (`r\m` is `rm`).
+    const names = this.escaped && this.target === "word" && atCommandWord(this.cmd.words);
+    const text = this.escaped ? escapedWord(this.word, this.plain, this.escapes, names) : this.word;
     const commas = this.escaped && text === this.plain ? this.plainCommas : this.commas;
+    if (this.live && this.target !== "heredoc") {
+      this.cmd.vars ??= new Set();
+      this.cmd.vars.add(text);
+    }
+    if (this.quoted && this.target === "word") {
+      this.cmd.quoted ??= new Set();
+      this.cmd.quoted.add(text);
+    }
     if (this.target === "write") this.cmd.writes.push(text);
     else if (this.target === "heredoc") {
       // `<<\EOF` and `<<'EOF'` both end at a line reading `EOF`.
-      this.heredocs.push({ delim: this.word.replace(/\\/g, ""), strip: this.heredocStrip });
+      this.heredocs.push({
+        delim: this.word.replace(/\\/g, ""),
+        strip: this.heredocStrip,
+        quoted: this.heredocQuoted,
+        owner: this.cmd,
+      });
     } else if (this.target === "word") {
       this.cmd.words.push(text);
       if (commas.length) this.addList(text, commas);

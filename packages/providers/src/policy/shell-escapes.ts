@@ -8,7 +8,8 @@
  * - `posix`: a backslash is removed and the character after it kept, and `$'…'` is decoded.
  * - `careful`: for a shell that isn't known, on Windows, where most backslashes are separators. A
  *   word is read the POSIX way only when that changes where it points: it climbs out of a folder
- *   (`\.\.`), or starts at the root or the home folder (`\/x`, `\~/x`).
+ *   (`\.\.`), or starts at the root or the home folder (`\/x`, `\~/x`). So is the word that names
+ *   the program, when that leaves a plain name (`r\m` is `rm`).
  * - `caret`: cmd's `^` is removed and the character after it kept; backslashes stay.
  */
 export type EscapeMode = "keep" | "posix" | "careful" | "caret";
@@ -22,13 +23,17 @@ const climbs = (word: string): number => word.split(/[\\/]+/).filter((s) => s ==
 /** True when a word starts at the root or the home folder, as a POSIX shell reads it. */
 const anchored = (word: string): boolean => /^[/~]/.test(word);
 
+/** A program's plain name, with no folder before it. */
+const PLAIN_NAME = /^[\w.+-]+$/;
+
 /**
  * The text of a word that held a backslash escape: `kept` as written, `plain` with the escapes
- * taken out.
+ * taken out. `names`: the word names the program the command runs.
  */
-export function escapedWord(kept: string, plain: string, mode: EscapeMode): string {
+export function escapedWord(kept: string, plain: string, mode: EscapeMode, names = false): string {
   if (mode === "posix") return plain;
   if (mode !== "careful") return kept;
+  if (names && PLAIN_NAME.test(plain)) return plain;
   const moves = climbs(plain) > climbs(kept) || (anchored(plain) && !anchored(kept));
   return moves ? plain : kept;
 }

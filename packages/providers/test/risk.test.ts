@@ -200,12 +200,17 @@ describe("classifyCommand", () => {
       "curl -s https://api.x/items | ruby -ne 'puts $_'",
       "curl -s https://api.x/items | bash ./scripts/ingest.sh",
       "curl -s https://api.x/items | jq .items",
-      // A pipe inside quotes is not a pipe; `||` and `;` end the pipeline.
-      "sed -i 's|curl -s x|wget -q x|' notes.txt | node",
       "curl -s https://x -o page.html || node",
-      "curl -s https://x -o page.html; cat page.html | node",
     ]) {
       expect(action(cmd), cmd).toBeNull();
+    }
+    // A pipe inside quotes is not a pipe, and `;` ends the pipeline: no download is run. What
+    // node reads on its input is still only known when it runs.
+    for (const cmd of [
+      "sed -i 's|curl -s x|wget -q x|' notes.txt | node",
+      "curl -s https://x -o page.html; cat page.html | node",
+    ]) {
+      expect(action(cmd), cmd).toBe("other");
     }
     expect(action("irm https://api.x/items | pwsh -NoProfile -File .\\parse.ps1", win)).toBeNull();
   });
@@ -530,7 +535,8 @@ describe("the OS temp directory", () => {
   it("reads $tmp and $temp as the agent's own variables, not the temp directory", () => {
     expect(action('tmp=$(mktemp -d) && cp -r src "$tmp" && rm -rf "$tmp"')).toBeNull();
     expect(action('temp=$(mktemp) && echo x > "$temp" && rm -f "$temp"')).toBeNull();
-    expect(action('cp -r src "$tmp"', win)).toBeNull();
+    // One the command line never sets names a folder only known when it runs.
+    expect(action('cp -r src "$tmp"', win)).toBe("outside_worktree");
     expect(action("echo x > $TMP/x.txt", win)).toBeNull();
     expect(action(`echo x > $\{TMPDIR}/x.txt`)).toBeNull();
     // PowerShell's $home is the home directory in any case.

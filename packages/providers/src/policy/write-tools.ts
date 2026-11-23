@@ -2,10 +2,14 @@
  * Files that tools write or change through their operands (§11.2), beside the copies, downloads
  * and item cmdlets the classifier already reads: `dd of=x`, `ln -s a x` (the link is what is
  * written), `install`, `rsync`, `unzip -d`, `chmod`, `chown` and `chgrp`, `sed -i`, `perl -pi`, `truncate`,
- * and git's own outputs
- * (`git clone url x`, `git worktree add x`, `git diff --output=x`, `git format-patch -o x`,
- * `git archive -o x`). The risk classifier judges each as a write.
+ * what a download, a sort or a patch saves (`curl -o x`, `wget -O x`, `sort -o x`, `patch -o x`),
+ * the files a compressor replaces (`gzip x`), `mkfifo`, the database `sqlite3` opens, and git's
+ * own outputs (`git clone url x`, `git worktree add x`, `git diff --output=x`,
+ * `git format-patch -o x`, `git archive -o x`, `git config --file x`, `git submodule add url x`,
+ * `git checkout-index --prefix=x`). The risk classifier judges each as a write.
  */
+import { DISCARD } from "./command-words";
+import { writesConfig } from "./git";
 
 /** The value of `--name=value` or `--name value` (also a short form, `-o value`, `-ovalue`). */
 function optionValues(args: string[], long: string, short?: string): string[] {
@@ -76,6 +80,72 @@ export function toolWrites(bin: string, args: string[]): string[] {
   if ((bin === "perl" || bin === "ruby") && args.some((a) => IN_PLACE.test(a))) {
     return editedInPlace(args);
   }
+  // `curl -o /dev/null` and `wget -O -` save nothing.
+  return moreToolWrites(bin, args).filter((target) => target !== "-" && !DISCARD.test(target));
+}
+
+/** The values of short options (`-o x`, `-ox`, at the end of a cluster: `-sSLo x`). */
+function shortValues(args: string[], letters: string): string[] {
+  const out: string[] = [];
+  for (const [i, arg] of args.entries()) {
+    const at = /^-[a-zA-Z#]+/.test(arg)
+      ? [...arg].findIndex((c, k) => k > 0 && letters.includes(c))
+      : -1;
+    if (at < 0) continue;
+    const value = arg.slice(at + 1) || args[i + 1];
+    if (value !== undefined) out.push(value);
+  }
+  return out;
+}
+
+/** Compressors, which replace each file they are given unless they write to the output. */
+const COMPRESSORS = /^(?:gzip|gunzip|xz|unxz|bzip2|bunzip2|zstd|unzstd|lz4|compress|uncompress)$/;
+
+/** `sqlite3`'s options that take the next word. */
+const SQLITE_VALUED = ["-cmd", "-init", "-separator", "-newline", "-nullvalue", "-vfs", "-maxsize"];
+
+/** Downloads, sorters, patches, compressors, pipes and databases: the files they write. */
+function moreToolWrites(bin: string, args: string[]): string[] {
+  if (bin === "curl") {
+    return [
+      ...shortValues(args, "oDc"),
+      ...[
+        "--output",
+        "--output-dir",
+        "--dump-header",
+        "--cookie-jar",
+        "--trace",
+        "--stderr",
+      ].flatMap((long) => optionValues(args, long)),
+    ];
+  }
+  if (bin === "wget") {
+    const longs = ["--output-document", "--directory-prefix", "--output-file", "--append-output"];
+    return [...shortValues(args, "OPoa"), ...longs.flatMap((long) => optionValues(args, long))];
+  }
+  if (bin === "sort") return optionValues(args, "--output", "-o");
+  if (bin === "patch") {
+    const longs = ["--output", "--directory", "--reject-file"];
+    return [...shortValues(args, "odr"), ...longs.flatMap((long) => optionValues(args, long))];
+  }
+  if (COMPRESSORS.test(bin)) {
+    // `-c`, `-t` and `-l` (also in a cluster, `-dc`) write no file.
+    const reads = args.some(
+      (a) => /^-[a-zA-Z0-9]*[ctl]/.test(a) || /^--(stdout|test|list)$/.test(a),
+    );
+    const out = bin === "zstd" || bin === "lz4" ? optionValues(args, "--output", "-o") : [];
+    return reads ? out : [...out, ...operands(args, ["-S", "--suffix", "-T", "-M", "-o"])];
+  }
+  if (bin === "mkfifo" || bin === "mknod") {
+    const names = operands(args, ["-m", "--mode", "-Z", "--context"]);
+    return bin === "mknod" ? names.slice(0, 1) : names;
+  }
+  if (bin === "sqlite3" && !args.some((a) => /^--?readonly$/.test(a))) {
+    // The database is its first operand; `:memory:` and none are no file.
+    return operands(args, SQLITE_VALUED)
+      .slice(0, 1)
+      .filter((db) => db && !db.startsWith(":"));
+  }
   return [];
 }
 
@@ -107,6 +177,7 @@ const GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace
 const CLONE_VALUED = ["-b", "--branch", "-o", "--origin", "--depth", "-c", "--config", "-j"];
 const CLONE_MORE = ["--reference", "--separate-git-dir", "--template", "-u", "--upload-pack"];
 const WORKTREE_VALUED = ["-b", "-B", "--reason", "--orphan"];
+const SUBMODULE_VALUED = ["-b", "--branch", "--name", "--reference", "--depth"];
 
 /** The files and folders a git command writes outside its repository's own state. */
 export function gitWrites(args: string[]): string[] {
@@ -128,6 +199,16 @@ export function gitWrites(args: string[]): string[] {
     const out = optionValues(rest, "--output", sub === "archive" ? "-o" : undefined);
     return sub === "bundle" && rest[0] === "create" ? [...out, ...rest.slice(1, 2)] : out;
   }
+  // `git config --file x name value` changes that file; reading it writes nothing.
+  if (sub === "config") {
+    const changes = writesConfig(rest.map((a) => a.toLowerCase()));
+    return changes ? optionValues(rest, "--file", "-f") : [];
+  }
+  if (sub === "submodule" && rest[0]?.toLowerCase() === "add") {
+    // `git submodule add <url> <path>`: without a path it lands in the current folder.
+    return operands(rest.slice(1), SUBMODULE_VALUED).slice(1, 2);
+  }
+  if (sub === "checkout-index") return optionValues(rest, "--prefix");
   // `git diff`, `git log`, `git show` and their kin write their output to `--output=file`.
   return optionValues(rest, "--output");
 }

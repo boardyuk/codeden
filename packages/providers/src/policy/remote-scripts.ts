@@ -136,7 +136,7 @@ const isStdin = (arg: string | undefined): boolean =>
  * True when the command runs what it reads on stdin as code: an interpreter given no program
  * (no `-c`/`-e` code, module or script file), or told to read it from stdin (`-`, `sh -s`).
  */
-function runsStdin(cmd: SimpleCommand): boolean {
+export function runsStdin(cmd: SimpleCommand): boolean {
   const { tokens } = unwrap(cmd.words);
   const bin = binName(tokens[0]);
   if (bin === "iex" || bin === "invoke-expression") return true;
