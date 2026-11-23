@@ -141,6 +141,19 @@ describe("shell functions", () => {
     asksAtBoth(["f() { rm -rf /c/other; }; f"], gitBash);
   });
 
+  it("reads a header written apart from its name or its body", () => {
+    const apart = [
+      "f () { rm -rf /other; }; f",
+      "f () { git clean -fdx; }; cd /other && f",
+      "f () { cd /other; }; f; git clean -fdx",
+      "f ()\n{\n  cd /other\n}\nf\ngit clean -fdx",
+      "f()\n{\n  git clean -fdx\n}\ncd /other\nf",
+    ];
+    asksAtBoth(apart, posix);
+    asksAtBoth(apart, unknown);
+    neverAsks(["build () { pnpm build; }; build", "clean ()\n{\n  rm -rf dist\n}\nclean"], posix);
+  });
+
   it("ends for a function that calls itself", () => {
     expect(levels("f() { f; }; f", posix)).toBe("-/-");
     expect(levels("f() { g; }; g() { f; rm -rf /other; }; f", posix)).toBe("auto/full");

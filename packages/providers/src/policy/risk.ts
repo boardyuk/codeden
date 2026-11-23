@@ -10,12 +10,12 @@ import { downloadWrites } from "./downloads";
 import { dumpsEnvironment } from "./env-dumps";
 import { type ListOutput, namesOnly } from "./env-names";
 import { classifyGit } from "./git";
-import { inlineCode, inlineCodeWrites } from "./inline-code";
+import { inlineCode, inlineCodeCommands, inlineCodeWrites } from "./inline-code";
 import { type InlineScript, inlineScripts } from "./inline-scripts";
 import { classifyInstall } from "./installs";
 import { itemWrites } from "./item-writes";
 import { MAX_LOCATIONS, moveTo } from "./locations";
-import { isInside, isSecretPath, resolveAgainst } from "./paths";
+import { isInside, isSecretPath, isWin, resolveAgainst } from "./paths";
 import { projectConfigCommand } from "./project-config";
 import { providerLoginCommand } from "./provider-logins";
 import { keptWords } from "./ps-assignments";
@@ -128,7 +128,8 @@ function firstInList(
         const found = firstInList(ran.list, ran.ctx, depth, check, feeds || piped);
         if (found) return found;
       }
-      for (const script of scriptsOf(cmd, depth, cmd.piped ? list[head] : undefined)) {
+      const source = cmd.piped ? list[head] : undefined;
+      for (const script of [...scriptsOf(cmd, depth, source), ...codeScripts(cmd, here, depth)]) {
         const into = feeds || piped || script.feeds === true;
         const there = scriptContext(script, cmd, here);
         for (const inner of shellReadings(script.text, script.dialect, there)) {
@@ -147,6 +148,14 @@ function firstInList(
   }
   return undefined;
 }
+
+/** A script nested deeper than is followed (`MAX_DEPTH`): what it runs isn't read. */
+const TOO_DEEP: RiskAssessment = {
+  risky: true,
+  action: "outside_worktree",
+  reason: "Runs a command nested too deep to read",
+  always: true,
+};
 
 /** A command line that may leave the shell in more folders than are followed (`./locations`). */
 const TOO_MANY_LOCATIONS: RiskAssessment = {
@@ -212,6 +221,25 @@ function scriptsOf(cmd: SimpleCommand, depth: number, source?: SimpleCommand): I
   if (depth >= MAX_DEPTH) return [];
   const { tokens } = unwrap(cmd.words);
   return inlineScripts(binName(tokens[0]), tokens.slice(1), cmd, source);
+}
+
+/** True when `cmd` runs a script nested deeper than is followed, so what it runs isn't read. */
+function tooDeep(cmd: SimpleCommand, depth: number, source?: SimpleCommand): boolean {
+  return depth >= MAX_DEPTH && scriptsOf(cmd, 0, source).length > 0;
+}
+
+/**
+ * The command lines the code of an interpreter's one-liner may run (`./inline-code`:
+ * `python -c "os.system('…')"`), read from its string literals. A guess, so only what they write
+ * or delete outside the worktree, and what every level asks about, counts.
+ */
+function codeScripts(cmd: SimpleCommand, ctx: RiskContext, depth: number): InlineScript[] {
+  if (depth >= MAX_DEPTH) return [];
+  const { tokens } = unwrap(cmd.words);
+  const dialect = isWin(ctx) ? "auto" : "posix";
+  return inlineCode(binName(tokens[0]), tokens.slice(1))
+    .flatMap(inlineCodeCommands)
+    .map((text) => ({ text, dialect }));
 }
 
 /**
@@ -290,6 +318,13 @@ function classifyActions(
     for (const list of lists) ran.push(classifyList(list, there, depth + 1, output));
     if (script.dynamic && !lists.every(listOnlyReads))
       ran.push(risky("other", `${UNKNOWN} (${bin})`));
+  }
+  if (tooDeep(cmd, depth, at.source)) found.push(TOO_DEEP);
+  for (const script of codeScripts(cmd, ctx, depth)) {
+    for (const list of shellReadings(script.text, script.dialect, ctx)) {
+      const guess = classifyList(list, ctx, depth + 1, "feeds");
+      if (guess.risky && guess.action === "outside_worktree") ran.push(guess);
+    }
   }
   // A risk that was read comes before one that is only "unknown".
   const unknown = (r: RiskAssessment) => r.risky && r.reason.startsWith(UNKNOWN);

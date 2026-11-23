@@ -7,6 +7,8 @@ const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", 
 
 /** The header of a POSIX function definition: `f()` or `f(){`, before its body. */
 const FUNCTION_HEADER = /^[A-Za-z_][\w-]*\(\)\{?$/;
+/** A function's name, when its `()` is a word of its own: `f () { … }`. */
+export const FUNCTION_NAME = /^[A-Za-z_][\w-]*$/;
 /** A `case` pattern before its commands: `*.txt)`, with no `(` of its own. */
 const CASE_PATTERN = /^[^()]+\)$/;
 
@@ -34,7 +36,7 @@ export interface Unwrapped {
  * Words that don't change what runs: elevation and wrappers with their own options (`sudo -u x`,
  * `timeout 9`, `nice -n 5`, `command`, `exec`, `busybox`; `./wrappers`), `env -u X Y=1`, shell
  * keywords that start a compound command (`if`, `then`, `do`, `{`, ...), the header of a function
- * definition (`f() {`, `function f {`: its body is judged where it is written), a `case` and its
+ * definition (`f() {`, `f () {`, `function f {`: its body is judged where it is written), a `case` and its
  * patterns, and cmd's `@`. `env` with no command to run prints the environment, so it stays the
  * program then.
  */
@@ -61,6 +63,9 @@ export function unwrap(words: string[]): Unwrapped {
       rest = rest.slice(rest[2] === "()" ? 3 : 2);
     } else if (head && FUNCTION_HEADER.test(head)) {
       rest = rest.slice(1);
+    } else if (head && rest[1] === "()" && FUNCTION_NAME.test(head)) {
+      // `f () { … }`: the name and its parentheses written apart.
+      rest = rest.slice(2);
     } else if (head === "case" && rest.some((w) => w.toLowerCase() === "in")) {
       rest = rest.slice(rest.findIndex((w) => w.toLowerCase() === "in") + 1);
     } else if (head && rest.length > 1 && CASE_PATTERN.test(head)) {

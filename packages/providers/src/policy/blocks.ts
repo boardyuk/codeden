@@ -1,8 +1,10 @@
-import { binName, DISCARD, unwrap } from "./command-words";
+import { binName, DISCARD, FUNCTION_NAME, unwrap } from "./command-words";
+import { inlineScripts } from "./inline-scripts";
 import { locationsAfter, MAX_LOCATIONS } from "./locations";
 import type { PathContext } from "./paths";
 import { programDenial } from "./read-only";
 import type { SimpleCommand } from "./shell";
+import { shellReadings } from "./shell-readings";
 
 /**
  * Commands a command line runs through braces and functions (§11.2): a PowerShell script block
@@ -31,6 +33,8 @@ function definition(cmd: SimpleCommand): { name: string; header: number } | unde
   const [first = "", second, third] = cmd.words;
   const posix = HEADER.exec(first);
   if (posix?.[1]) return { name: posix[1].toLowerCase(), header: 1 };
+  // `f () { … }`: the name and its parentheses written apart.
+  if (second === "()" && FUNCTION_NAME.test(first)) return { name: first.toLowerCase(), header: 2 };
   const keyword = first.toLowerCase();
   if ((keyword !== "function" && keyword !== "filter") || !second) return undefined;
   // PowerShell: `function global:f($a) { … }`.
@@ -66,7 +70,8 @@ function collect(list: SimpleCommand[], found: Map<string, SimpleCommand[]>): vo
     }
     const first = { ...cmd, words: cmd.words.slice(def.header) };
     const body = [first];
-    if (first.words[0] === "{" || cmd.words[0]?.endsWith("{")) {
+    // The body goes on in the next commands: after `{`, or when it starts on the next line.
+    if (first.words[0] === "{" || cmd.words[0]?.endsWith("{") || first.words.length === 0) {
       for (const next of list.slice(i + 1)) {
         if (next.words[0] === "}") break;
         body.push(next);
@@ -105,9 +110,23 @@ export function ranLists<T extends WithFunctions>(
   return out;
 }
 
+/** The programs that run a string in the shell itself, so its folder changes stay. */
+const EVALS = new Set(["eval", "iex", "invoke-expression"]);
+
+/** The command lists the string `cmd` evaluates holds (`eval 'cd ..'`), in each reading. */
+function evaluated(cmd: SimpleCommand, ctx: PathContext): SimpleCommand[][] {
+  const { tokens } = unwrap(cmd.words);
+  const bin = binName(tokens[0]);
+  if (!EVALS.has(bin)) return [];
+  return inlineScripts(bin, tokens.slice(1), cmd).flatMap((script) =>
+    shellReadings(script.text, script.dialect, ctx),
+  );
+}
+
 /**
  * Every location the shell may be in after `cmd`, from each of `ctxs`: where `cmd` itself moves
- * (`./locations`), and where its blocks and a function it calls may, since they may run or not.
+ * (`./locations`), and where its blocks, a function it calls and a string it evaluates may, since
+ * they may run or not.
  */
 export function locationsThrough<T extends PathContext & WithFunctions>(
   cmd: SimpleCommand,
@@ -115,7 +134,8 @@ export function locationsThrough<T extends PathContext & WithFunctions>(
 ): T[] {
   let out = locationsAfter(cmd, ctxs);
   for (const here of ctxs) {
-    for (const ran of ranLists(cmd, here)) {
+    const strings = evaluated(cmd, here).map((list) => ({ list, ctx: here }));
+    for (const ran of [...ranLists(cmd, here), ...strings]) {
       let inner: T[] = [ran.ctx];
       for (const one of ran.list) {
         inner = locationsThrough(one, inner);

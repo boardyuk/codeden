@@ -127,13 +127,20 @@ describe("eval and Invoke-Expression", () => {
         'Invoke-Expression "Remove-Item -Recurse -Force C:\\other"',
         "iex 'Remove-Item -Recurse -Force C:\\other'",
         "iex -Command 'Remove-Item -Recurse -Force C:\\other'",
+        "iex -Command:'Remove-Item -Recurse -Force C:\\other'",
         "'Remove-Item -Recurse C:\\other' | iex",
         "iex 'if (1) { Remove-Item -Recurse C:\\other }'",
       ],
       ps,
     );
     neverAsks(['eval "git status"', "eval 'pnpm test && rm -rf ./dist'"]);
-    neverAsks(["iex 'git status'", "iex 'Remove-Item -Recurse .\\dist'"], ps);
+  });
+
+  it("follows a folder change in the string, and asks for nesting too deep to read", () => {
+    asksAtBoth(["eval 'cd ..'; git clean -fdx", "eval 'cd /other'; rm -rf build"]);
+    asksAtBoth(["iex 'cd ..'; git clean -fdx"], ps);
+    neverAsks(["eval 'cd packages/x'; rm -rf dist"]);
+    asksAtBoth(["eval eval eval eval eval rm -rf /other", "eval eval eval eval eval git status"]);
   });
 
   it("asks for a string that is only known when it runs, unless it only reads", () => {
@@ -189,6 +196,24 @@ describe("tools that write through their operands", () => {
       "truncate -s 0 ./x.log",
       "rsync -a src/ /tmp/copy/",
     ]);
+  });
+
+  it("reads the option shapes of the write tools", () => {
+    asksAtBoth([
+      "ln -st /other a",
+      "chmod -w /other/x",
+      "chmod -R -x /other",
+      "perl -pi -e 's/a/b/' /other/x",
+      "perl -i.bak -pe 's/a/b/' /other/x",
+      "ruby -i -pe 'gsub(/a/, \"b\")' /other/x",
+    ]);
+    neverAsks([
+      "chmod -x scripts/run.sh",
+      "sed -ie '/foo/d' src/x.ts",
+      "perl -pi -e 's|/usr/local|/opt|' src/x.ts",
+      "perl -ne 'print if /foo/' /etc/hosts",
+    ]);
+    neverAsks(["iex 'git status'", "iex 'Remove-Item -Recurse .\\dist'"], ps);
   });
 
   it("reads each tool's operands", () => {
@@ -281,6 +306,36 @@ describe("interpreter one-liners", () => {
       "ruby -e 'puts 1'",
     ]);
     neverAsks(["node -e \"require('fs').writeFileSync('C:/work/repo/x','hi')\""], ps);
+  });
+
+  it("reads a path at the root or climbing out, and strings that are text as text", () => {
+    asksAtBoth([
+      "python -c \"import shutil; shutil.rmtree('/other')\"",
+      "python -c \"import shutil; shutil.rmtree('../other')\"",
+      "node --eval=\"require('fs').rmSync('/other/x')\"",
+    ]);
+    neverAsks([
+      "node -e \"const fs=require('fs'); fs.writeFileSync('x', fs.readFileSync('x','utf8').replace('/api/v1','/api/v2'))\"",
+      "cd packages/x && python -c \"import shutil; shutil.copy('../y/a.txt', 'a.txt')\"",
+      "node -e \"require('fs').writeFileSync('routes.json', JSON.stringify(['/', '/about']))\"",
+    ]);
+  });
+
+  it("reads the commands a one-liner runs from its string literals", () => {
+    asksAtBoth([
+      "python -c \"import os; os.system('rm -rf /other')\"",
+      "python -c \"import subprocess; subprocess.run(['rm', '-rf', '/other/x'])\"",
+      "node -e \"require('child_process').execSync('rm -rf /other/x')\"",
+      "node -e \"require('child_process').execFileSync('rm', ['-rf', '/other/x'])\"",
+      "perl -e 'system(\"rm -rf /other/x\")'",
+    ]);
+    const token = "python -c \"import os; os.system('cat /home/me/.codeden/install-token')\"";
+    expect(classifyCommand(token, posix)).toMatchObject({ codeden: true });
+    neverAsks([
+      "node -e \"require('child_process').execSync('pnpm test', {stdio: 'inherit'})\"",
+      "python -c \"import subprocess; print(subprocess.check_output(['git', 'status']))\"",
+      "python -c \"import subprocess; subprocess.run(['rm', '-rf', 'dist'])\"",
+    ]);
   });
 
   it("finds rooted string literals only in code that writes", () => {

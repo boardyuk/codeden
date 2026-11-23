@@ -86,7 +86,10 @@ export function scriptFlag(bin: string, args: readonly string[]): number {
  * hands it (`'Remove-Item x' | iex`). Anything else a pipe hands it is only known when it runs.
  */
 function evaluated(args: string[], cmd: SimpleCommand, source?: SimpleCommand): InlineScript[] {
-  const words = args.filter((a) => !/^-(c|co|com|comm|comma|comman|command)$/i.test(a));
+  // `-Command x`, or bound with a colon: `-Command:x`.
+  const words = args
+    .filter((a) => !/^-(c|co|com|comm|comma|comman|command)$/i.test(a))
+    .map((a) => a.replace(/^-(c|co|com|comm|comma|comman|command):/i, ""));
   const piped = words.length === 0 && cmd.piped === true;
   const literal = piped && source?.words.length === 1 && source.nested.length === 0;
   const text = literal ? (source.words[0] as string) : words.join(" ");

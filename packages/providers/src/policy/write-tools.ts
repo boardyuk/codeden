@@ -1,8 +1,8 @@
 /**
  * Files that tools write or change through their operands (§11.2), beside the copies, downloads
  * and item cmdlets the classifier already reads: `dd of=x`, `ln -s a x` (the link is what is
- * written), `install`, `rsync`, `unzip -d`, `chmod`, `chown` and `chgrp`, `sed -i`, `truncate`, and
- * git's own outputs
+ * written), `install`, `rsync`, `unzip -d`, `chmod`, `chown` and `chgrp`, `sed -i`, `perl -pi`, `truncate`,
+ * and git's own outputs
  * (`git clone url x`, `git worktree add x`, `git diff --output=x`, `git format-patch -o x`,
  * `git archive -o x`). The risk classifier judges each as a write.
  */
@@ -42,15 +42,20 @@ export function toolWrites(bin: string, args: string[]): string[] {
     return args.filter((a) => /^of=./i.test(a)).map((a) => a.slice(3));
   }
   if (bin === "ln") {
-    const into = optionValues(args, "--target-directory", "-t");
+    // `-t dir`, also at the end of a cluster (`-st dir`).
+    const clustered = args.filter((_, i) => /^-[a-zA-Z]+t$/.test(args[i - 1] ?? ""));
+    const into = [...optionValues(args, "--target-directory", "-t"), ...clustered];
     const names = operands(args, ["-t", "--target-directory", "-S", "--suffix"]);
     // One name links it into the current folder; with more, the last is the link or its folder.
     return [...into, ...(names.length > 1 ? names.slice(-1) : [])];
   }
   if (bin === "chmod" || bin === "chown" || bin === "chgrp") {
-    const reference = args.some((a) => a.startsWith("--reference"));
-    // The first operand is the mode or the owner, unless `--reference` gives it.
-    return operands(args, ["--reference"]).slice(reference ? 0 : 1);
+    // The first operand is the mode or the owner, unless `--reference` gives it, or the mode
+    // reads as an option (`chmod -w x`).
+    const given = args.some(
+      (a) => a.startsWith("--reference") || (bin === "chmod" && /^-[rwxXst]+$/.test(a)),
+    );
+    return operands(args, ["--reference"]).slice(given ? 0 : 1);
   }
   if (bin === "install" || bin === "rsync") {
     const into = optionValues(args, "--target-directory", bin === "install" ? "-t" : undefined);
@@ -63,11 +68,37 @@ export function toolWrites(bin: string, args: string[]): string[] {
     return args.flatMap((a, i) => (a === "-d" && args[i + 1] ? [args[i + 1] as string] : []));
   if (bin === "truncate") return operands(args, ["-s", "--size", "-r", "--reference"]);
   if (bin === "sed" && editsInPlace(args)) {
-    const scripted = args.some((a) => /^(-[a-zA-Z]*[ef]|--expression|--file)/.test(a));
+    // Letters after an `i` are its backup suffix (`-ie`), not `-e`.
+    const scripted = args.some((a) => /^(-[a-hj-zA-Z]*[ef]|--expression|--file)/.test(a));
     const valued = ["-e", "-f", "--expression", "--file", "-l", "--line-length"];
     return operands(args, valued).slice(scripted ? 0 : 1);
   }
+  if ((bin === "perl" || bin === "ruby") && args.some((a) => IN_PLACE.test(a))) {
+    return editedInPlace(args);
+  }
   return [];
+}
+
+/** `perl -pi -e …` and `ruby -i -pe …`: `-i`, alone, in a cluster or with a backup suffix. */
+const IN_PLACE = /^-[lnpaws0]*i/;
+
+/** The files an in-place `perl` or `ruby` edits: its operands, after the script when no `-e` gives it. */
+function editedInPlace(args: string[]): string[] {
+  const out: string[] = [];
+  let scripted = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--") {
+      out.push(...args.slice(i + 1));
+      break;
+    }
+    if (IN_PLACE.test(arg)) continue;
+    if (/^-[a-zA-Z0-9]*[eE]$/.test(arg)) {
+      scripted = true;
+      i += 1;
+    } else if (!arg.startsWith("-")) out.push(arg);
+  }
+  return scripted ? out : out.slice(1);
 }
 
 /** Git's global options that take the next word (`-C dir`, `-c name=value`). */
