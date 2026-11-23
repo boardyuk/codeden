@@ -8,8 +8,10 @@ import {
   Notice,
   NoticeBatchData,
   Overview,
+  PROVIDER_SWITCH_CODE,
   ProjectStatus,
   ProviderCapabilities,
+  ProviderSwitchData,
   RoleMessageRequest,
   RunnerCommand,
   Session,
@@ -333,6 +335,21 @@ describe("session archive and worktree cleanup (§9)", () => {
     // Sessions written before cleanup existed have neither field.
     expect(Session.parse(sampleSession).archivedAt).toBeUndefined();
     expect(() => WorktreeCleanupOutcome.parse({ status: "gone", message: null })).toThrow();
+  });
+
+  it("switches a role's provider at a usage limit by default, and round-trips its notice", () => {
+    expect(Settings.parse({}).providers.autoSwitchOnLimit).toBe(true);
+    const off = Settings.parse({ providers: { autoSwitchOnLimit: false } });
+    expect(Settings.parse(JSON.parse(JSON.stringify(off))).providers.autoSwitchOnLimit).toBe(false);
+    // A settings file from before the switch existed keeps its role defaults.
+    const older = Settings.parse({ providers: { pm: { provider: "codex" } } });
+    expect(older.providers).toMatchObject({ pm: { provider: "codex" }, autoSwitchOnLimit: true });
+    const moved = { reason: "usage_limit", from: "claude", to: "codex", retryAt: ts };
+    expect(ProviderSwitchData.parse(JSON.parse(JSON.stringify(moved)))).toEqual(moved);
+    const stuck = { reason: "no_fallback", from: "claude", to: null, retryAt: null };
+    expect(ProviderSwitchData.parse(stuck)).toEqual(stuck);
+    expect(PROVIDER_SWITCH_CODE).toBe("provider_switch");
+    expect(() => ProviderSwitchData.parse({ ...moved, reason: "other" })).toThrow();
   });
 
   it("defaults worktree cleanup on, after a week", () => {
