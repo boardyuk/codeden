@@ -176,4 +176,32 @@ describe("stops the PM makes with a reason (#593)", () => {
     env.factory.retry(projectId(), a.id, "rebuild", "pm");
     expect(s.item(a.id)).toMatchObject({ stage: "backlog", stop: null });
   });
+
+  it("keeps a stop made while the tick steps through earlier items the PM's call", async () => {
+    env = createFactoryEnv({ limits: { pauseAfterConsecutiveFailures: 1 } });
+    s.enable();
+    const items = [s.backlogItem("Add a counter", 31), s.backlogItem("Add a timer", 32)];
+    await s.tick();
+    const builders = items.map((i) => s.item(i.id).builderSessionId as string);
+    expect(builders.every(Boolean)).toBe(true);
+    for (const id of builders) await env.setStatus(id, "idle");
+    // The tick has read both building items; while it nudges the first, the PM stops the other's
+    // builder, so the tick's copy of that item has no stop on it.
+    const send = env.sessions.send;
+    let other: string | undefined;
+    env.sessions.send = (async (...args: Parameters<typeof send>) => {
+      if (!other) {
+        other = builders.find((id) => id !== args[0]);
+        if (other) await pmStop(other, "waiting on #30");
+      }
+      return send(...args);
+    }) as typeof send;
+    await s.tick();
+    const stopped = items.map((i) => s.item(i.id)).find((i) => i.builderSessionId === other);
+    expect(stopped).toMatchObject({ stage: "failed", reason: "Stopped by the PM: waiting on #30" });
+    expect(loop()).toMatchObject({
+      consecutiveFailures: 0,
+      state: expect.not.stringMatching(/paused/),
+    });
+  });
 });

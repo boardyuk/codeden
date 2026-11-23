@@ -1,11 +1,15 @@
 import {
   type FactoryHoldBy,
   type FactoryItem,
+  type FactoryItemStage,
   type FactoryLoop,
   factoryStopReason,
 } from "@codeden/contracts";
 import type { FactoryContext } from "./context";
 import { failItem } from "./outcomes";
+
+/** The steps that end an item as a stop made on purpose (`progress.ts`, `verify.ts`). */
+const STOPPABLE: FactoryItemStage[] = ["building", "verifying"];
 
 /**
  * Stops made on purpose (§10.1, Held work). `stop_session` with a reason on a factory item's
@@ -21,7 +25,8 @@ import { failItem } from "./outcomes";
 /**
  * Record a stop on the item whose current builder or reviewer `sessionId` is; with `stop` null,
  * clear a stop recorded for that session (the session couldn't be stopped). Null when the session
- * works on no factory item, or on an automatic revert.
+ * works on no factory item, on an automatic revert, or on an item past building and verifying
+ * (merged and watched: nothing would read the stop, and it mustn't outlive the call).
  */
 export function recordStop(
   ctx: FactoryContext,
@@ -35,6 +40,7 @@ export function recordStop(
     if (item.stop?.sessionId !== sessionId) return item;
     return ctx.store.updateItem(item.id, (i) => ({ ...i, stop: null }), { touch: false });
   }
+  if (!STOPPABLE.includes(item.stage)) return null;
   const at = ctx.now().toISOString();
   return ctx.store.updateItem(
     item.id,
@@ -43,17 +49,29 @@ export function recordStop(
   );
 }
 
+/**
+ * The item as stored now. A tick reads a stage's items once and then steps through them in turn,
+ * so a stop recorded since (just before its session stopped) is only on the stored item: read
+ * from the tick's copy, the stopped session would count as a failure.
+ */
+function stored(ctx: FactoryContext, item: FactoryItem): FactoryItem {
+  return ctx.store.item(item.id) ?? item;
+}
+
 /** Whether the item's current builder or reviewer was stopped by the stop recorded on it. */
 export function stoppedOnPurpose(ctx: FactoryContext, item: FactoryItem): boolean {
-  const id = item.stop?.sessionId;
-  if (!id || item.source === "revert") return false;
-  if (id !== item.builderSessionId && id !== item.reviewerSessionId) return false;
+  if (item.source === "revert") return false;
+  const current = stored(ctx, item);
+  const id = current.stop?.sessionId;
+  if (!id) return false;
+  if (id !== current.builderSessionId && id !== current.reviewerSessionId) return false;
   return ctx.repo.find(id)?.session.status === "stopped";
 }
 
 /** The item ends as the stop's call: failed with its reason, never counted towards the pause. */
 export function endStopped(ctx: FactoryContext, loop: FactoryLoop, item: FactoryItem): FactoryLoop {
-  const reason = item.stop ? factoryStopReason(item.stop) : "Stopped on purpose";
+  const stop = stored(ctx, item).stop;
+  const reason = stop ? factoryStopReason(stop) : "Stopped on purpose";
   ctx.log?.(`factory: ${item.id}: ${reason}`);
   return failItem(ctx, loop, item, reason, { countsAsFailure: false, notify: false });
 }
