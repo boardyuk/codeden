@@ -22,8 +22,10 @@ export const OPENCODE_PROVIDER_ID = "opencode";
 /**
  * Honest flags (Principle 5). Steering is OpenCode's `delivery: "steer"`; approvals and the
  * read-only level go through OpenCode's permission requests, decided by CodeDen's policy for
- * every call (so autonomy changes apply live); subagents are child sessions. Not wired up yet:
- * rollback (OpenCode's revert), fork, plan mode (OpenCode's `plan` agent) and skills.
+ * every call (so autonomy changes apply live); subagents are child sessions. Skills and custom
+ * commands are OpenCode's own lists, reported for the `/` menu: `/<command>` runs the command
+ * and `/<skill>` attaches the skill to the prompt (`commands.ts`). Not wired up yet: rollback
+ * (OpenCode's revert), fork and plan mode (OpenCode's `plan` agent).
  */
 const capabilities: ProviderCapabilities = {
   resume: true,
@@ -38,7 +40,7 @@ const capabilities: ProviderCapabilities = {
   planMode: false,
   reasoningEffort: true,
   mcp: true,
-  skills: false,
+  skills: true,
   liveAutonomy: true,
   readOnly: true,
   compact: true,

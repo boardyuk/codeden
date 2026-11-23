@@ -14,6 +14,7 @@ import type { ResolvedCommand } from "../util/exec";
 import { explicitModel } from "../util/model";
 import { type ApprovalDeps, handleForm, handlePermission } from "./approvals";
 import { OpenCodeHttpError, seg } from "./client";
+import { OpenCodeCommands, type OpenCodeRoute, runCommand, withSkill } from "./commands";
 import {
   mcpName,
   modelId,
@@ -23,6 +24,7 @@ import {
   SESSION_PERMISSIONS,
   toPromptBody,
 } from "./config";
+import type { TurnOutcome } from "./errors";
 import { userMessageEvent } from "./items";
 import { OpenCodeEventMapper } from "./mapper";
 import { OpenCodePolicy } from "./policy";
@@ -55,6 +57,8 @@ export class OpenCodeSession implements ProviderSession {
   private readonly mapper: OpenCodeEventMapper;
   private readonly broker: ApprovalBroker;
   private readonly policy: OpenCodePolicy;
+  /** The `/` commands and skills OpenCode lists for the worktree, and how input is routed. */
+  private readonly commands: OpenCodeCommands;
   private server: OpenCodeServer | undefined;
   private starting: Promise<OpenCodeServer> | undefined;
   private stream: AbortController | undefined;
@@ -116,6 +120,9 @@ export class OpenCodeSession implements ProviderSession {
     );
     this.model = explicitModel(opts.model);
     this.effort = opts.effort;
+    this.commands = new OpenCodeCommands(opts.cwd, (commands) =>
+      this.events.push({ type: "session.updated", commands }),
+    );
   }
 
   /** Start the server and open (or resume) the OpenCode session. */
@@ -148,14 +155,13 @@ export class OpenCodeSession implements ProviderSession {
     try {
       const server = await this.ensureServer();
       await this.applyModelChange(server);
+      const route = await this.commands.resolve(input.text, server.client);
       this.mapper.pendingTurnId = turnId;
       this.pendingInput = { turnId, input };
-      await server.client.post(
-        `/api/session/${seg(this.sessionId())}/prompt`,
-        toPromptBody(this.withInstructions(input)),
-      );
+      const refused = await this.dispatch(server, input, route);
       this.mapper.beginTurn(turnId);
-      this.flushNotice();
+      if (refused) this.mapper.endTurn(refused);
+      else this.flushNotice();
     } catch (error) {
       if (this.mapper.pendingTurnId === turnId) this.mapper.pendingTurnId = undefined;
       if (this.pendingInput?.turnId === turnId) this.pendingInput = undefined;
@@ -244,6 +250,25 @@ export class OpenCodeSession implements ProviderSession {
 
   // ---------------------------------------------------------------- internals
 
+  /**
+   * Send the input by its route (§13): `/<name>` runs a command OpenCode listed, or attaches a
+   * skill it listed; anything else is a prompt. A command OpenCode refuses comes back as the
+   * turn's failure. Instructions not yet given wait for the next prompt (a command's text is
+   * its arguments).
+   */
+  private async dispatch(
+    server: OpenCodeServer,
+    input: UserInput,
+    route: OpenCodeRoute,
+  ): Promise<TurnOutcome | undefined> {
+    const path = `/api/session/${seg(this.sessionId())}`;
+    if (route.type === "command") return runCommand(server.client, path, route, input);
+    const body = toPromptBody(this.withInstructions(input));
+    const moved = body.text.length - input.text.length;
+    await server.client.post(`${path}/prompt`, withSkill(body, route, moved));
+    return undefined;
+  }
+
   private sessionId(): string {
     const id = this.mapper.rootSession;
     if (!id) throw new ProviderSessionError("not_started", "OpenCode session is not started");
@@ -286,6 +311,7 @@ export class OpenCodeSession implements ProviderSession {
       );
       await this.openSession(server);
       void this.loadMcpNames(server);
+      void this.commands.refresh(server.client);
       return server;
     } catch (error) {
       await server.close();
@@ -433,6 +459,10 @@ export class OpenCodeSession implements ProviderSession {
     }
     if (event.type === "form.created") {
       void handleForm(event.data.form, this.deps());
+      return;
+    }
+    if (event.type === "command.updated" || event.type === "skill.updated") {
+      if (this.server) this.commands.updated(this.server.client);
       return;
     }
     this.mapper.handle(event);
