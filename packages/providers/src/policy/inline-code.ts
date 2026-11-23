@@ -33,6 +33,14 @@ const CODE_FLAGS = new Map<string, RegExp>([
   ["php", /^-r$/],
 ]);
 
+/** The same options with the code written right after them: `python -c"…"`, `perl -le'…'`. */
+const ATTACHED = new Map<string, RegExp>([
+  ["python", /^-[bBdEhiIOPqsSuvVxR]*c(.+)$/s],
+  ["perl", /^-[a-zA-Z0-9]*?[eE](.+)$/s],
+  ["ruby", /^-[a-zA-Z]*?e(.+)$/s],
+  ["php", /^-r(.+)$/s],
+]);
+
 /** `python3`, `python3.12`, `py`, `pypy3`, `nodejs` and the like, by their plain name. */
 function interpreter(bin: string): string | undefined {
   if (/^(python|pypy)[\d.]*$|^py$/.test(bin)) return "python";
@@ -40,14 +48,19 @@ function interpreter(bin: string): string | undefined {
   return CODE_FLAGS.has(bin) ? bin : undefined;
 }
 
-/** The code of an interpreter's one-liner (every `-c`/`-e` given, also `--eval=code`), or none. */
+/**
+ * The code of an interpreter's one-liner (every `-c`/`-e` given, also `--eval=code` and the code
+ * written onto its option, `-c"…"`), or none.
+ */
 export function inlineCode(bin: string, args: string[]): string[] {
-  const flag = CODE_FLAGS.get(interpreter(bin) ?? "");
+  const name = interpreter(bin) ?? "";
+  const flag = CODE_FLAGS.get(name);
   if (!flag) return [];
   return args.flatMap((a, i) => {
     const bound = /^(--eval|--print)=(.+)$/s.exec(a);
     if (bound?.[2] && flag.test(bound[1] as string)) return [bound[2]];
-    return flag.test(a) && args[i + 1] ? [args[i + 1] as string] : [];
+    if (flag.test(a)) return args[i + 1] ? [args[i + 1] as string] : [];
+    return ATTACHED.get(name)?.exec(a)?.[1] ?? [];
   });
 }
 
@@ -107,24 +120,34 @@ export function inlineCodeWrites(code: string): string[] {
 const unquoted = (body: string): string => body.replace(/\\([\\/"'])/g, "$1");
 
 /**
- * Calls that only test or print text and are handed nothing but literals (`print('/x')`,
- * `f.endswith('.pem')`, `console.log('/x')`): their strings are left out of the paths a one-liner
- * reads. A call handed another call (`print(open('/x').read())`) stays.
+ * A plain string literal (Python's `r'…'` and `b'…'` too): nothing in it is filled in or run, so
+ * no `{` (`f'{…}'`, Ruby's `"#{…}"`) and no line break.
  */
-const TEST_OR_PRINT =
-  /(?:\.(?:startsWith|endsWith|startswith|endswith|includes|indexOf)|\b(?:print|puts|console\.\w+))\s*\([^()]*\)/g;
+const PLAIN = String.raw`[rbuRBU]{0,2}(?:"(?:\\.|[^"\\\n{])*"|'(?:\\.|[^'\\\n{])*')`;
+/**
+ * Calls that only test or print text and are handed nothing but plain literals (`print('/x')`,
+ * `f.endswith(('.pem', '.key'))`, `console.log('/x')`): their strings are left out of the paths a
+ * one-liner reads. A call handed anything else (`print(open('/x').read())`, `print(p := '/x')`)
+ * stays.
+ */
+const TEST_OR_PRINT = new RegExp(
+  String.raw`(?:\.(?:startsWith|endsWith|startswith|endswith|includes|indexOf)|\b(?:print|puts|console\.\w+))\s*\(\s*[([]?(?:\s*${PLAIN}\s*,?)*\s*[)\]]?\s*\)`,
+  "g",
+);
 /** Not a file: a URL, or text with a line break, a pipe or a quote in it. */
 const NOT_A_FILE = /^[a-z][\w+.-]*:\/\/|[\n\r|"<>]/i;
 
 /**
  * The files `code` may read: each string literal that may be a path, absolute or relative, its
- * open mode taken off (perl's `open(F, '</x')`). The risk classifier judges each like a file `cat`
- * reads (`classifyRead`), so a literal naming a secrets file or CodeDen's home asks however the
- * code opens it (`open`, `readFileSync`, `File.read`, `file_get_contents`).
+ * open mode taken off (perl's `open(F, '</x')`), also inside code in a string
+ * (`exec("open('/x')")`). The risk classifier judges each like a file `cat` reads
+ * (`classifyRead`), so a literal naming a secrets file or CodeDen's home asks however the code
+ * opens it (`open`, `readFileSync`, `File.read`, `file_get_contents`).
  */
-export function inlineCodePaths(code: string): string[] {
+export function inlineCodePaths(code: string, depth = 0): string[] {
   const out: string[] = [];
   for (const text of literals(code.replace(TEST_OR_PRINT, ""))) {
+    if (depth < 2 && /["'`]/.test(text)) out.push(...inlineCodePaths(text, depth + 1));
     const path = text.replace(/^\+?(?:<|>>?)\s*/, "").trim();
     if (path && !NOT_A_FILE.test(path)) out.push(path);
   }
@@ -135,22 +158,48 @@ export function inlineCodePaths(code: string): string[] {
 const literals = (code: string): string[] =>
   [...code.matchAll(LITERAL)].map((m) => unquoted(m[2] as string));
 
-/** Calls that run a command: `os.system`, `subprocess.run`, `execSync`, `spawn`, `system`. */
-const RUNS = /\b(system|popen\w*|exec\w*|spawn\w*|subprocess|check_call|check_output|passthru)\b/i;
+/**
+ * Calls that run a command: `os.system`, `subprocess.run`, `execSync`, `spawn`, `system`, PHP's
+ * `shell_exec` and `proc_open`, Ruby's `Open3`.
+ */
+const RUNS =
+  /\b(system|popen\w*|exec\w*|spawn\w*|subprocess|check_call|check_output|passthru|shell_exec|proc_open|Open3)\b/i;
 /** A word a shell reads as it is written. */
 const PLAIN_WORD = /^[\w@%+=:,./\\~-]+$/;
 /** More literals than this are read one by one only. */
 const MAX_WORDS = 24;
+/** The closing mark of Perl's `qx(…)` and Ruby's `%x(…)`, by the opening one. */
+const CLOSERS: Record<string, string> = { "(": ")", "{": "}", "[": "]", "<": ">" };
 
 /**
- * The command lines `code` may run, when it uses a call that runs one: each string literal with a
+ * The command lines Perl, Ruby and PHP run without a call: in backticks, `qx(…)` and `%x(…)`, and
+ * a pipe that Perl's or Ruby's `open` starts (`open(F, "cat x |")`, `open("|cat x")`).
+ */
+function quotedCommands(code: string, bin: string): string[] {
+  const name = interpreter(bin) ?? "";
+  if (name !== "perl" && name !== "ruby" && name !== "php") return [];
+  const out = [...code.matchAll(/`((?:\\.|[^`\\])*)`/g)].map((m) => m[1] as string);
+  for (const m of code.matchAll(/(?:\bqx|%x)\s*([^\w\s])/g)) {
+    const from = m.index + m[0].length;
+    const end = code.indexOf(CLOSERS[m[1] as string] ?? (m[1] as string), from);
+    if (end > from) out.push(code.slice(from, end));
+  }
+  if (name === "php") return out;
+  const pipes = literals(code).flatMap((t) => /^\s*\|(.+)$|^(.+)\|\s*$/s.exec(t)?.slice(1) ?? []);
+  return [...out, ...pipes.filter((t): t is string => t !== undefined)];
+}
+
+/**
+ * The command lines `code` (run by `bin`) may run: those Perl, Ruby and PHP run in backticks and
+ * the like (`quotedCommands`); and when it uses a call that runs one, each string literal with a
  * space in it (`os.system('rm -rf x')`), and each run of literals from a program's name on, as
  * the words of one command (`subprocess.run(['rm', '-rf', 'x'])`, `execFileSync('rm', ['x'])`).
  */
-export function inlineCodeCommands(code: string): string[] {
-  if (!RUNS.test(code)) return [];
+export function inlineCodeCommands(code: string, bin = ""): string[] {
+  const quoted = quotedCommands(code, bin);
+  if (!RUNS.test(code)) return quoted;
   const found = literals(code);
-  const out = found.filter((text) => /\S\s+\S/.test(text));
+  const out = [...quoted, ...found.filter((text) => /\S\s+\S/.test(text))];
   if (found.length > MAX_WORDS) return out;
   const words = found.map((w) => (PLAIN_WORD.test(w) ? w : `'${w.replace(/'/g, "")}'`));
   for (const [i, word] of found.entries()) {

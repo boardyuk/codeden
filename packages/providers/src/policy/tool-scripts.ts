@@ -192,6 +192,12 @@ function runnerScripts(cmd: SimpleCommand, bin: string, args: string[]): InlineS
 
 /** Tools that delete or write the files they are given, which a package manager runs by name. */
 const FILE_TOOLS = new Set(["rimraf", "del", "del-cli", "cpy", "cpx", "shx"]);
+/**
+ * Shells, interpreters and the tools that run a command with variables set, which a package
+ * manager also runs by name (`pnpm node -e …`, `yarn sh -c …`, `pnpm cross-env A=1 rimraf x`).
+ */
+const RUNS_GIVEN =
+  /^(?:sh|bash|zsh|dash|ksh|fish|pwsh|powershell|cmd|node|nodejs|deno|tsx|ts-node|perl|ruby|php|(?:python|pypy)[\d.]*|py|cross-env(?:-shell)?|dotenv)$/;
 
 /**
  * Package managers that run a script, or else a package's tool, by name: bare (`pnpm rimraf x`,
@@ -199,7 +205,7 @@ const FILE_TOOLS = new Set(["rimraf", "del", "del-cli", "cpy", "cpx", "shx"]);
  * a value.
  */
 const BY_NAME: Record<string, { bare: boolean; valued: readonly string[] }> = {
-  pnpm: { bare: true, valued: ["--filter", "-F", "-C", "--dir"] },
+  pnpm: { bare: true, valued: ["--filter", "-F", "-C", "--dir", "--reporter"] },
   yarn: { bare: true, valued: ["--cwd"] },
   bun: { bare: true, valued: ["--cwd", "--filter", "-F"] },
   npm: { bare: false, valued: ["--prefix", "-w", "--workspace"] },
@@ -207,8 +213,9 @@ const BY_NAME: Record<string, { bare: boolean; valued: readonly string[] }> = {
 
 /**
  * The tool a package manager runs by name, with its arguments, when it is one that deletes or
- * writes files (`FILE_TOOLS`). Any other name (`pnpm build`) runs a script of the project's
- * manifest, or a command of the manager itself, so it is left alone.
+ * writes files (`FILE_TOOLS`) or runs what it is handed (`RUNS_GIVEN`). Any other name
+ * (`pnpm build`) runs a script of the project's manifest, or a command of the manager itself, so
+ * it is left alone.
  */
 function byName(cmd: SimpleCommand, bin: string, args: string[]): InlineScript[] {
   const spec = BY_NAME[bin];
@@ -225,7 +232,8 @@ function byName(cmd: SimpleCommand, bin: string, args: string[]): InlineScript[]
     else break;
   }
   const tool = args[i]?.toLowerCase();
-  if ((!run && !spec.bare) || tool === undefined || !FILE_TOOLS.has(tool)) return [];
+  if ((!run && !spec.bare) || tool === undefined) return [];
+  if (!FILE_TOOLS.has(tool) && !RUNS_GIVEN.test(tool)) return [];
   return [ran(cmd, [tool, ...args.slice(i + 1)])];
 }
 

@@ -85,6 +85,42 @@ describe("files an interpreter's code reads", () => {
     }
   });
 
+  it("ask at every level however the code is given or runs its command", () => {
+    const token = "/home/me/.codeden/install-token";
+    for (const command of [
+      // Code written onto its option.
+      `python -c"print(open('${token}').read())"`,
+      `perl -e'open(F, "${token}"); print <F>'`,
+      `ruby -e"puts File.read('${token}')"`,
+      `php -r"echo file_get_contents('${token}');"`,
+      // Commands run in backticks, `qx`, `%x`, a pipe `open` and PHP's and Ruby's own calls.
+      `perl -le 'print \`cat ${token}\`'`,
+      `perl -e 'print qx(cat ${token})'`,
+      `perl -e 'open(my $f, "cat ${token} |"); print <$f>'`,
+      `ruby -e 'puts %x(cat ${token})'`,
+      `ruby -e 'require "open3"; puts Open3.capture2("cat ${token}")[0]'`,
+      `php -r 'echo shell_exec("cat ${token}");'`,
+      // Code in a string, and a path handed to a print call that keeps it.
+      `python3 -c 'exec("print(open(\\"${token}\\").read())")'`,
+      `python3 -c "print(p := '${token}') or print(open(p).read())"`,
+      `ruby -e "puts(File.read '${token}')"`,
+      // An interpreter or a shell a package manager runs by name.
+      `pnpm node -e "console.log(require('fs').readFileSync('${token}', 'utf8'))"`,
+      `yarn sh -c "cat ${token}"`,
+    ]) {
+      expect(levels(command), command).toBe("auto/full");
+      expect(codeden(command), command).toBe(true);
+    }
+    for (const command of [
+      "iex '[IO.File]::ReadAllText(''C:\\Users\\me\\.codeden\\install-token'')'",
+      "pwsh -Command '[IO.File]::ReadAllText(''C:\\Users\\me\\.codeden\\install-token'')'",
+      "(New-Object System.IO.StreamReader('C:\\Users\\me\\.codeden\\install-token')).ReadToEnd()",
+    ]) {
+      expect(levels(command, ps), command).toBe("auto/full");
+      expect(codeden(command, ps), command).toBe(true);
+    }
+  });
+
   it("ask for other credential files at Auto, also through a command the code runs", () => {
     for (const command of [
       `python -c "import os; os.system('cat ~/.ssh/id_rsa')"`,
@@ -125,10 +161,18 @@ describe("files an interpreter's code reads", () => {
       `node -e "fetch('https://example.com/.env').then(r => r.text())"`,
       `python -c "print(open('/home/me/.codeden/artifacts/abc123/shot.png', 'rb').read()[:8])"`,
       "python - <<'EOF'\nprint(open('src/index.ts').read())\nEOF",
+      "ruby -e 'puts `git status`'",
+      "perl -i.bak -pe 's/foo/bar/' src/index.ts",
+      "python -c\"print('hi')\"",
     ]) {
       expect(levels(command), command).toBe("-/-");
     }
-    for (const command of ["[IO.Path]::Combine('a', 'b')", "'Get-ChildItem' | pwsh -Command -"]) {
+    for (const command of [
+      "[IO.Path]::Combine('a', 'b')",
+      "'Get-ChildItem' | pwsh -Command -",
+      "Write-Host 'don''t stop'",
+      "New-Object IO.StreamReader('src\\index.ts')",
+    ]) {
       expect(levels(command, ps), command).toBe("-/-");
     }
   });
@@ -144,5 +188,8 @@ describe("inlineCodePaths", () => {
     expect(inlineCodePaths(`get('https://x/y')`)).toEqual([]);
     expect(inlineCodePaths(`print('/x'); s.endswith('.key')`)).toEqual([]);
     expect(inlineCodePaths(`print(open('/x').read())`)).toEqual(["/x"]);
+    expect(inlineCodePaths(`s.endswith(('.pem', '.key'))`)).toEqual([]);
+    expect(inlineCodePaths(`print(p := '/x')`)).toEqual(["/x"]);
+    expect(inlineCodePaths(`puts("#{File.read('/x')}")`)).toContain("/x");
   });
 });

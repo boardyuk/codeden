@@ -258,12 +258,13 @@ class Lexer {
     b.add(src.slice(start, this.i));
   }
 
+  /** A single-quoted string. PowerShell writes a quote in one twice: `'it''s'` is `it's`. */
   private readSingle(): string {
-    const end = this.src.indexOf("'", this.i + 1);
-    const stop = end === -1 ? this.src.length : end;
-    const text = this.src.slice(this.i + 1, stop);
-    this.i = stop + 1;
-    return text;
+    const body = this.dialect === "powershell" ? /'((?:[^']|'')*)('?)/y : /'([^']*)('?)/y;
+    body.lastIndex = this.i;
+    const [, text = "", closed] = body.exec(this.src) ?? [];
+    this.i = body.lastIndex + (closed ? 0 : 1);
+    return text.replace(/''/g, "'");
   }
 
   /** A double-quoted string: escapes, and `$(…)` substitutions run as nested commands. */

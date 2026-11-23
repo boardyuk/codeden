@@ -24,8 +24,17 @@ export interface DotnetWrites {
 
 /** A static call on `File` or `Directory`: the method, then its arguments up to the `)`. */
 const CALL = /\[\s*(?:System\.)?IO\.(?:File|Directory)\s*\]\s*::\s*(\w+)\s*\(/gi;
-/** A static call or constructor on another `System.IO` type (`[IO.StreamReader]::new(`). */
-const OTHER_CALL = /\[\s*(?:System\.)?IO\.(?!(?:File|Directory)\s*\])\w+\s*\]\s*::\s*\w+\s*\(/gi;
+/**
+ * A static call or constructor on another `System.IO` type (`[IO.StreamReader]::new(`), or one
+ * built with its arguments in brackets (`New-Object IO.StreamReader('x')`).
+ */
+const OTHER_CALL = new RegExp(
+  [
+    String.raw`\[\s*(?:System\.)?IO\.(?!(?:File|Directory)\s*\])\w+\s*\]\s*::\s*\w+\s*\(`,
+    String.raw`\bNew-Object\s+(?:-TypeName\s+)?(?:System\.)?IO\.\w+\s*\(`,
+  ].join("|"),
+  "gi",
+);
 /** Methods that change the path they are given first. */
 const CHANGES = /^(?:Delete|Write\w*|Append\w*|Create\w*|Open|OpenWrite|Encrypt|Decrypt|Set\w+)$/i;
 

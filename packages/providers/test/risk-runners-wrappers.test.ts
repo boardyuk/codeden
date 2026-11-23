@@ -51,6 +51,23 @@ describe("file tools a package manager runs by name", () => {
       "yarn cpx 'src/**' /other",
       "pnpm shx rm -rf /other",
       "yarn shx cp a /other/a",
+      "pnpm --reporter silent rimraf /other",
+    ]);
+  });
+
+  it("are classified when they are a shell, an interpreter or a variable setter", () => {
+    expectLevels("auto/full", [
+      "pnpm sh -c 'rm -rf /other'",
+      "yarn bash -c 'rm -rf /other'",
+      "bun run sh -c 'rm -rf /other'",
+      "pnpm node -e \"require('fs').rmSync('/other', { recursive: true })\"",
+      "pnpm cross-env A=1 rimraf /other",
+      "pnpm dotenv -- rimraf /other",
+    ]);
+    expectLevels("-/-", [
+      "pnpm node scripts/build.mjs",
+      "pnpm sh -c 'echo hi'",
+      "pnpm cross-env NODE_ENV=production vite build",
     ]);
   });
 
@@ -96,7 +113,9 @@ describe("more wrappers", () => {
       "runuser bob -c 'rm -rf /other'",
       "gosu bob rm -rf /other",
       "script -c 'rm -rf /other' /dev/null",
+      "script -qc 'rm -rf /other' /dev/null",
       "script -q /dev/null rm -rf /other",
+      "su -lc 'rm -rf /other'",
       "tmux new -d 'rm -rf /other'",
       "tmux new-session -d -s build rm -rf /other",
       "tmux split-window -c /other 'rm -rf x'",

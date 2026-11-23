@@ -211,7 +211,9 @@ export function wrappedCommand(bin: string, args: string[], chdir: string[]): st
   if (!spec) return undefined;
   if (spec.command) {
     const { short, long } = spec.command;
-    const named = (a: string) => (short !== undefined && a === `-${short}`) || a === long;
+    // Also after other short options: `script -qc '…'`, `su -lc '…'`.
+    const named = (a: string) =>
+      (short !== undefined && /^-[a-zA-Z]*$/.test(a) && a.endsWith(short)) || a === long;
     const at = args.findIndex((a) => named(a) || a.startsWith(`${long}=`));
     const arg = args[at] ?? "";
     const given = named(arg) ? args[at + 1] : arg.slice(long.length + 1);

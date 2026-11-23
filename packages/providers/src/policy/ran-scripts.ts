@@ -102,7 +102,8 @@ export function codeScripts(
 ): InlineScript[] {
   if (depth >= MAX_DEPTH) return [];
   const dialect = isWin(ctx) ? "auto" : "posix";
+  const bin = binName(unwrap(cmd.words).tokens[0]);
   return codeOf(cmd, feed, ctx)
-    .code.flatMap(inlineCodeCommands)
+    .code.flatMap((code) => inlineCodeCommands(code, bin))
     .map((text) => ({ text, dialect }));
 }
