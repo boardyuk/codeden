@@ -1,5 +1,6 @@
 import {
   ConflictDecision,
+  FACTORY_HOLD_REASON_MAX,
   messageFrom,
   ProviderId,
   ReasoningEffort,
@@ -161,20 +162,41 @@ export const messageSession = defineTool({
   },
 });
 
-/** `stop_session` (§8.4, always loaded): stop one of the project's agents. */
+/**
+ * `stop_session` (§8.4, always loaded): stop one of the project's agents. A factory builder or
+ * reviewer stopped with a reason stops its item as the PM's call, not as a failure (§10.1).
+ */
 export const stopSession = defineTool({
   name: "stop_session",
   description:
-    "Stop one of this project's agent sessions (it can be resumed later). Use it for duplicates, runaway work or work that is no longer wanted; say why in reason.",
+    "Stop one of this project's agent sessions (it can be resumed later). Use it for duplicates, runaway work or work that is no longer wanted; say why in reason. For a factory builder or reviewer, the reason (held, superseded, waiting on another PR) stops its item as your call: it never counts towards the factory's pause after failures in a row, and factory_retry_item runs it again later. Without a reason it counts as a failed item. To keep an issue from being started at all, use factory_hold_issue.",
   roles: ["pm"],
   scope: "project",
   alwaysLoad: true,
-  input: z.object({ sessionId: z.string().min(1), reason: z.string().max(500).optional() }),
-  handler: async ({ sessionId }, { services, projectId }) => {
+  input: z.object({
+    sessionId: z.string().min(1),
+    reason: z.string().max(FACTORY_HOLD_REASON_MAX).optional(),
+  }),
+  handler: async ({ sessionId, reason }, { services, projectId }) => {
     const session = agentSessionOf(services, sessionId, projectId);
     if (ENDED.has(session.status))
       throw new ToolError(`Session ${session.id} already ${session.status}`);
-    const stopped = await services.sessions.stop(session.id);
-    return { status: stopped.status, sessionId: session.id };
+    // Recorded before the stop, so the loop never sees the stopped session without it.
+    const why = reason?.trim();
+    const item = why
+      ? services.factory.recordStop(projectId, session.id, { reason: why, by: "pm" })
+      : null;
+    let stopped: Awaited<ReturnType<typeof services.sessions.stop>>;
+    try {
+      stopped = await services.sessions.stop(session.id);
+    } catch (error) {
+      if (item) services.factory.recordStop(projectId, session.id, null);
+      throw error;
+    }
+    return {
+      status: stopped.status,
+      sessionId: session.id,
+      ...(item ? { factoryItemId: item.id } : {}),
+    };
   },
 });

@@ -57,6 +57,8 @@ const capabilities: ProviderCapabilities = {
   mcpStatus: true,
   // `hook/started` and `hook/completed` show as `hook_run` items.
   hookRuns: true,
+  // `developerInstructions` goes with `thread/start` and `thread/resume` alike.
+  systemPrompt: true,
 };
 
 const CONFIGURED_MODEL = "The model configured in ~/.codex/config.toml";

@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { PickerFooterChoice } from "@/components/composer/model-picker/footer";
 import { ModelPicker } from "@/components/composer/model-picker/model-picker";
 import { Segmented, SettingRow, SettingsSection } from "@/components/settings/settings-ui";
+import { ProjectTokenSaverRow } from "@/components/settings/token-saver";
 import { AUTONOMY, AUTONOMY_LEVELS } from "@/components/thread/autonomy";
 import { useProjectActions } from "@/lib/project-actions";
 import { sessionsKeepingLevel } from "@/lib/project-permissions";
@@ -131,6 +132,7 @@ export function ProjectSettings({ project }: { project: Project }) {
           </p>
         )}
       </SettingRow>
+      <ProjectTokenSaverRow project={project} />
     </SettingsSection>
   );
 }

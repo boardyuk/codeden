@@ -15,6 +15,7 @@ import { CustomModelSettings } from "./custom-models";
 import { ModelVisibilitySettings } from "./model-visibility";
 import { ProviderHistorySettings } from "./provider-history";
 import { Segmented, SettingRow, SettingsSection, useSettings } from "./settings-ui";
+import { TokenSaverSettingsSection } from "./token-saver";
 import { UpdateModeSetting } from "./update-mode";
 
 export function GeneralSettings() {
@@ -82,6 +83,7 @@ export function GeneralSettings() {
           />
         </SettingRow>
       </SettingsSection>
+      <TokenSaverSettingsSection />
       <AgentEnvironmentSettings />
       <SettingsSection title="Background work">
         <SettingRow
@@ -184,7 +186,10 @@ export function ProviderSettings() {
           );
         })}
       </SettingsSection>
-      <SettingsSection title="Defaults per role" description="Each role can run on any provider.">
+      <SettingsSection
+        title="Defaults per role"
+        description="Each role can run on any provider. Changing the provider of the orchestrator or of project managers starts a fresh conversation for them on their next message."
+      >
         {roles.map(({ role, label, help }) => {
           const current = settings.providers[role];
           const auto = current.provider === "auto";

@@ -77,7 +77,7 @@ export function ProjectGroup({
   const [archiving, setArchiving] = useState(false);
   const entries = useProjectMenu(project, position, () => setArchiving(true));
   const pm = sessions
-    .filter((s) => s.role === "pm")
+    .filter((s) => s.role === "pm" && !s.archivedAt)
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
   const agents = sortSessions(sessions.filter((s) => s.role === "agent" && !s.archivedAt));
   // Counted by the server: the snapshot carries only the recently archived sessions.

@@ -49,6 +49,8 @@ const capabilities: ProviderCapabilities = {
   mcpStatus: true,
   // `includeHookEvents`: the settings hooks that ran show as `hook_run` items.
   hookRuns: true,
+  // `--append-system-prompt` is sent on every start and resume and survives compaction.
+  systemPrompt: true,
 };
 
 const EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];

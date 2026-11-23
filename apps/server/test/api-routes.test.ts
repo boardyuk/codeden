@@ -179,6 +179,28 @@ describe("api routes", () => {
     expect(settings.setup.completed).toBe(true);
   });
 
+  it("saves provider settings without waiting for role sessions to be retired", async () => {
+    const roles = server.services.orchestration.roles;
+    const original = roles.applyProviderSettings.bind(roles);
+    const calls: unknown[] = [];
+    // Stopping a session can take the runner many seconds: these retirements never end.
+    roles.applyProviderSettings = (previous) => {
+      calls.push(previous);
+      return new Promise<void>(() => {});
+    };
+    try {
+      const res = await call("PATCH", "/settings", {
+        providers: { orchestrator: { provider: "codex" } },
+      });
+      expect(res.status).toBe(200);
+      expect(res.json()).toMatchObject({ providers: { orchestrator: { provider: "codex" } } });
+      // Handed the settings as they were, to tell which role's provider changed.
+      expect(calls).toMatchObject([{ orchestrator: { provider: "auto" } }]);
+    } finally {
+      roles.applyProviderSettings = original;
+    }
+  });
+
   it("lists folders for the picker starting at home", async () => {
     const listing = FsListResponse.parse((await call("GET", "/fs/list")).json());
     expect(listing.path).toBe(join(home, "user"));
