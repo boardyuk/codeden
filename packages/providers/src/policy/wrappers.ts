@@ -1,6 +1,6 @@
 /**
- * Programs that run another command (§11.2): elevation (`sudo -u root rm …`, `runuser`, `gosu`)
- * and wrappers (`timeout 9 rm …`, `nice -n 5 rm …`, `busybox rm …`, `wsl rm …`), also through a
+ * Programs that run another command (§11.2): elevation (`sudo -u root rm …`) and wrappers
+ * (`timeout 9 rm …`, `nice -n 5 rm …`, `busybox rm …`, `wsl rm …`, `gosu user rm …`), also through a
  * subcommand of their own (`conda run`, `mise exec … --`, `tmux new '…'`). `./command-words`'
  * `unwrap` skips their own options, with the values those take, so the classifier judges the
  * command they run. They are recognised by basename (`/usr/bin/sudo`, `timeout.exe`).
@@ -64,14 +64,6 @@ const ELEVATORS = new Map<string, WrapperSpec>(
       long: ["--group", "--supp-group", "--shell", "--whitelist-environment"],
       command: { short: "c", long: "--command" },
     },
-    // `runuser -u user [--] command`, or su's way: `runuser user -c '…'`.
-    runuser: {
-      short: "ugGsw",
-      long: ["--user", "--group", "--supp-group", "--shell", "--whitelist-environment"],
-      command: { short: "c", long: "--command" },
-    },
-    // `gosu user[:group] command`.
-    gosu: { operands: 1 },
   }),
 );
 
@@ -154,6 +146,14 @@ const WRAPPERS = new Map<string, WrapperSpec>(
       chdir: { short: "C", long: "--cd" },
       command: { short: "c", long: "--command" },
     },
+    // Run by root to switch to another user: `runuser -u user [--] command`, su's
+    // `runuser user -c '…'`, `gosu user[:group] command`.
+    runuser: {
+      short: "ugGsw",
+      long: ["--user", "--group", "--supp-group", "--shell", "--whitelist-environment"],
+      command: { short: "c", long: "--command" },
+    },
+    gosu: { operands: 1 },
     "cross-env": {},
     "cross-env-shell": { shell: true },
     fakeroot: { short: "lisb", long: ["--lib", "--faked"] },

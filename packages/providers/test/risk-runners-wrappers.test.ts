@@ -116,13 +116,11 @@ describe("more wrappers", () => {
     });
   });
 
-  it("ask at Auto for a command run as another user", () => {
-    expectLevels("auto/-", ["gosu bob pnpm test", "runuser -u bob -- pnpm test"]);
-  });
-
   it("leave ordinary runs alone", () => {
     expectLevels("-/-", [
       "poetry run pytest",
+      "gosu node pnpm test",
+      "runuser -u node -- pnpm test",
       "cross-env NODE_ENV=test vitest",
       "conda run -n env pytest",
       "conda install numpy",
