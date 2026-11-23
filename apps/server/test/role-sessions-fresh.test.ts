@@ -8,7 +8,7 @@ import {
   WorktreeCleanup,
   type WorktreeCleanupDeps,
 } from "../src/services/sessions/worktree-cleanup";
-import { withRoles } from "./support/role-env";
+import { deferred, withRoles } from "./support/role-env";
 
 const text = (value: string) => ({
   input: { text: value, attachments: [] },
@@ -118,6 +118,39 @@ describe("role sessions: Start fresh (§8.1)", () => {
       inbox.close(inbox.get("q1"), "resolved", { answers: {} });
       const { session } = await roles.startFresh("pm", "p1", old.id);
       expect(livePms().map((s) => s.id)).toEqual([session.id]);
+    }),
+  );
+
+  it(
+    "makes one new session when a second click, a wake and a message arrive while the old one stops",
+    withRoles(async ({ roles, repo, sessions, settle, queue, livePms, commands, holdStop }) => {
+      const old = await roles.ensure("pm", "p1");
+      settle(old.id);
+      const gate = deferred();
+      holdStop(1, gate.promise);
+      const first = roles.startFresh("pm", "p1", old.id);
+      // The runner is still stopping the old session: it isn't archived yet.
+      expect(repo.get(old.id).archivedAt ?? null).toBeNull();
+
+      expect(await codeOf(roles.startFresh("pm", "p1", old.id))).toBe("conflict");
+      // A wake or a message to the role waits for the change and gets the new session.
+      const woken = roles.ensure("pm", "p1");
+      // A message straight to the old session (its open chat) waits and moves over; a wake
+      // (`reject`) is told to come back.
+      expect(await sessions.send(old.id, text("one more thing"), "user")).toEqual({
+        status: "queued",
+      });
+      expect(
+        await codeOf(sessions.send(old.id, { ...text("wake"), whenBusy: "reject" }, "codeden")),
+      ).toBe("turn_running");
+
+      gate.resolve();
+      const { session } = await first;
+      expect((await woken).id).toBe(session.id);
+      expect(livePms().map((s) => s.id)).toEqual([session.id]);
+      expect(commands.filter((c) => c === `session.send ${old.id}`)).toEqual([]);
+      expect(queue(old.id)).toEqual([]);
+      expect(queue(session.id)).toEqual([{ from: "user", text: "one more thing" }]);
     }),
   );
 
