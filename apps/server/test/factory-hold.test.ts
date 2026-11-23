@@ -140,7 +140,10 @@ describe("stops the PM makes with a reason (#593)", () => {
       stage: "failed",
       reason: "Stopped by the PM: superseded by #9",
     });
-    expect(loop()).toMatchObject({ consecutiveFailures: 0, state: expect.not.stringMatching(/paused/) });
+    expect(loop()).toMatchObject({
+      consecutiveFailures: 0,
+      state: expect.not.stringMatching(/paused/),
+    });
     // The PM made the call: it isn't told the item failed.
     expect(env.notices.some((n) => n.id === `factory.failed:${a.id}`)).toBe(false);
 
@@ -151,7 +154,10 @@ describe("stops the PM makes with a reason (#593)", () => {
     expect(reviewer).toBeTruthy();
     await pmStop(reviewer, "waiting on #8");
     await s.tick();
-    expect(s.item(b.id)).toMatchObject({ stage: "failed", reason: "Stopped by the PM: waiting on #8" });
+    expect(s.item(b.id)).toMatchObject({
+      stage: "failed",
+      reason: "Stopped by the PM: waiting on #8",
+    });
     expect(loop().consecutiveFailures).toBe(0);
 
     // The builder's own failure: it ends without a pull request after its nudge.
