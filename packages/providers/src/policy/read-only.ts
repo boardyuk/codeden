@@ -87,10 +87,12 @@ const READ_ONLY_BINS = new Set([
   "sort-object",
   "gh",
   "nl",
-  // Changing directory only moves where the next command runs.
+  // Changing directory only moves where the next command runs, and `dirs` only shows (or clears)
+  // the shell's own stack of them.
   "cd",
   "pushd",
   "popd",
+  "dirs",
   "chdir",
   "set-location",
   "sl",
