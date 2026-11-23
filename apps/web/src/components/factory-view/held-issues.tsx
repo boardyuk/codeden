@@ -25,19 +25,19 @@ export function HeldIssues({ held }: { held: FactoryHeldIssue[] }) {
             href={h.issue.url}
             target="_blank"
             rel="noreferrer"
-            className="block rounded-md border border-dashed border-border px-2 py-1.5 text-[11px] transition-colors hover:bg-accent/60"
+            className="block rounded-md border border-dashed border-border px-2 py-1.5 transition-colors hover:bg-accent/60"
             title={`Held${who ? ` by ${who}${since}` : ""}: ${heldReason(h)}. The factory skips it until the ${FACTORY_HOLD_LABEL} label comes off.`}
             data-testid="factory-held-issue"
           >
-            <span className="flex min-w-0 items-center gap-1.5">
-              <PauseCircle className="size-3 shrink-0 text-muted-foreground" aria-hidden />
-              <span className="shrink-0 font-medium text-muted-foreground">Held</span>
-              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                #{h.issue.number}
-              </span>
-              <span className="truncate">{h.issue.title}</span>
+            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <PauseCircle className="size-3 shrink-0" aria-hidden />
+              <span className="font-medium">Held</span>
+              <span className="font-mono">#{h.issue.number}</span>
             </span>
-            <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+            <span className="mt-1 line-clamp-2 text-[12px] leading-snug font-medium">
+              {h.issue.title}
+            </span>
+            <span className="mt-0.5 line-clamp-2 text-[10px] text-muted-foreground">
               {heldReason(h)}
             </span>
           </a>
