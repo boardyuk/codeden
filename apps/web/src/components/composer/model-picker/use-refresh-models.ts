@@ -4,18 +4,20 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useClient } from "@/lib/api";
 import { snapshotKey } from "@/lib/queries";
+import { projectModelsKey } from "./use-project-models";
 
 /**
  * "Refresh models": ask providers for their model lists again, e.g. after a model release or
  * a CLI update. The refreshed lists replace the snapshot's at once (open pickers re-render);
- * the runner's broadcast brings them to other windows.
+ * the runner's broadcast brings them to other windows. With a project, a provider whose list
+ * depends on the project (`capabilities.projectModels`) lists that project's models again too.
  */
 export function useRefreshModels() {
   const client = useClient();
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
 
-  const refresh = async (providerIds: readonly string[]) => {
+  const refresh = async (providerIds: readonly string[], projectId?: string | null) => {
     if (refreshing || providerIds.length === 0) return;
     setRefreshing(true);
     try {
@@ -37,6 +39,15 @@ export function useRefreshModels() {
             }
           : s,
       );
+      if (projectId) {
+        const perProject = [...fresh.values()].filter((p) => p.capabilities.projectModels);
+        const lists = await Promise.all(
+          perProject.map((p) => client.projectModels(p.id, projectId, { refresh: true })),
+        );
+        for (const list of lists) {
+          queryClient.setQueryData(projectModelsKey(projectId, list.providerId), list);
+        }
+      }
     } catch (e) {
       toast.error("Couldn't refresh the models", { description: (e as Error).message });
     } finally {
