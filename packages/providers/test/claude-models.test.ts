@@ -302,25 +302,16 @@ describe("ClaudeAdapter model discovery", () => {
 
   it("skips discovery when Claude Code is not installed", async () => {
     const sdk = stubSdk();
-    const keys = ["PATH", "Path", "HOME", "USERPROFILE"] as const;
-    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     const empty = mkdtempSync(join(tmpdir(), "codeden-empty-path-"));
-    process.env.PATH = empty;
-    if (process.platform === "win32") process.env.Path = empty;
-    // Known install locations (`~/.local/bin`) are looked at too: an empty home has none.
-    process.env.HOME = empty;
-    process.env.USERPROFILE = empty;
-    try {
-      const adapter = new ClaudeAdapter({ loadSdk: sdk.load });
-      await adapter.refreshModels();
-      expect(sdk.state.launches).toHaveLength(0);
-      expect(adapter.models().map((m) => m.id)).toEqual(["default", "opus", "sonnet", "haiku"]);
-    } finally {
-      for (const key of keys) {
-        if (saved[key] === undefined) delete process.env[key];
-        else process.env[key] = saved[key];
-      }
-    }
+    // Nothing on PATH and no known install locations (Homebrew's and the package managers'
+    // folders included): a Claude Code on this machine is never found.
+    const adapter = new ClaudeAdapter({
+      loadSdk: sdk.load,
+      locate: { pathEnv: empty, knownLocations: [] },
+    });
+    await adapter.refreshModels();
+    expect(sdk.state.launches).toHaveLength(0);
+    expect(adapter.models().map((m) => m.id)).toEqual(["default", "opus", "sonnet", "haiku"]);
   });
 });
 

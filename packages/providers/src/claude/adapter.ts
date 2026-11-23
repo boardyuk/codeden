@@ -15,7 +15,7 @@ import {
 import { executableFingerprint, ModelFreshness } from "../freshness";
 import { ModelCatalog } from "../models";
 import type { ResolvedCommand } from "../util/exec";
-import { ensureLocated, quickLocate } from "../util/locate";
+import { ensureLocated, type LocateOptions, quickLocate } from "../util/locate";
 import type { UtilityModel } from "../utility";
 import { CLAUDE_MIN_VERSION, detectClaude } from "./detect";
 import { forkClaudeConversation } from "./fork";
@@ -70,6 +70,8 @@ const FALLBACK_MODELS: ModelInfo[] = [
 export interface ClaudeAdapterOptions {
   /** Override executable resolution (tests, custom installs). */
   executable?: ResolvedCommand;
+  /** Where to look for `claude` (tests); default PATH, then its known install locations. */
+  locate?: LocateOptions;
   /** Max time for model discovery, CLI start-up included. */
   modelListTimeoutMs?: number;
   /**
@@ -99,20 +101,30 @@ export class ClaudeAdapter implements ProviderAdapter {
    * found broken are skipped until they change.
    */
   private executable(): ResolvedCommand | undefined {
-    return this.options.executable ?? quickLocate("claude");
+    return this.options.executable ?? quickLocate("claude", this.options.locate);
   }
 
   /**
    * Before a runner's first session or model list: check the copies once (`ensureLocated`),
-   * so `executable()` skips an old or broken one although no detection has run yet.
+   * so `executable()` skips an old or broken one although no detection has run yet. Not when
+   * the adapter was given an executable or its own `locate` options: the process-wide look-up
+   * searches PATH and the known locations, which those exist to replace.
    */
   private async located(): Promise<void> {
-    if (!this.options.executable) await ensureLocated("claude", CLAUDE_MIN_VERSION);
+    if (!this.options.executable && !this.options.locate) {
+      await ensureLocated("claude", CLAUDE_MIN_VERSION);
+    }
   }
 
   /** Finds a working copy (validating each one), so a broken shim never wins. */
   detect(): Promise<ProviderStatus> {
-    return detectClaude(this.options.executable ? { executable: this.options.executable } : {});
+    return detectClaude(
+      this.options.executable
+        ? { executable: this.options.executable }
+        : this.options.locate
+          ? { locate: this.options.locate }
+          : {},
+    );
   }
 
   capabilities(): ProviderCapabilities {
