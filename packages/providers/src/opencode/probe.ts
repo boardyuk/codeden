@@ -2,7 +2,8 @@ import { tmpdir } from "node:os";
 import type { ModelInfo } from "@codeden/contracts";
 import type { ResolvedCommand } from "../util/exec";
 import { openCodeModelList } from "./models";
-import type { OcCredential, OcModel, OcProvider } from "./protocol";
+import type { OcCredential, OcProvider } from "./protocol";
+import { CATALOG_DEADLINE_MS, readProviderCatalog } from "./ready";
 import { OpenCodeServer } from "./server";
 
 /** How long a probe may take, server start-up included. */
@@ -21,6 +22,8 @@ export interface OpenCodeProbe {
 /**
  * Start a private `opencode serve` in the temp directory, read its providers, credentials and
  * models, and stop it. No session is created and no model is called, so nothing is billed.
+ * The provider and model lists are polled until they settle: OpenCode 2.4.x loads them after
+ * printing its URL, and a single read at start-up sees an empty catalog (#651).
  * Rejects on failure or after `timeoutMs`; the server is stopped either way.
  */
 export async function probeOpenCode(
@@ -57,12 +60,13 @@ async function run(
   });
   try {
     const c = server.client;
-    const [info, providers, credentials, models, fallback] = await Promise.all([
+    const [info, credentials, catalog] = await Promise.all([
       c.get<{ version?: string }>("/api/info", signal).catch(() => undefined),
-      c.get<{ data: OcProvider[] }>("/api/provider", signal),
       c.get<{ data: OcCredential[] }>("/api/credential", signal).catch(() => ({ data: [] })),
-      c.get<{ data: OcModel[] }>("/api/model", signal),
-      c.get<{ data: OcModel | null }>("/api/model/default", signal).catch(() => ({ data: null })),
+      readProviderCatalog(c, signal, {
+        // Leave the start-up and a final response inside the caller's probe budget.
+        deadlineMs: Math.min(CATALOG_DEADLINE_MS, Math.max(1_000, timeoutMs - 1_500)),
+      }),
     ]);
     const connected = [
       ...new Set(
@@ -71,9 +75,9 @@ async function run(
     ];
     return {
       version: typeof info?.version === "string" ? info.version : null,
-      providers: providers.data ?? [],
+      providers: catalog.providers,
       connected,
-      models: openCodeModelList(models.data ?? [], providers.data ?? [], fallback.data),
+      models: openCodeModelList(catalog.models, catalog.providers, catalog.defaultModel),
     };
   } finally {
     await server.close();

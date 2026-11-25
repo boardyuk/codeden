@@ -48,7 +48,12 @@ describe("OpenCode detection", () => {
 
   it("asks for a provider when none is configured", async () => {
     process.env.FAKE_OPENCODE_MODE = "no-providers";
-    const status = await detectOpenCode({ executable: fake, probe: (exe) => probeOpenCode(exe) });
+    // A short probe budget: an empty catalog never settles early, so this is where the
+    // empty-list deadline is exercised; the test needn't wait for the product's 12 s.
+    const status = await detectOpenCode({
+      executable: fake,
+      probe: (exe) => probeOpenCode(exe, { timeoutMs: 4_000 }),
+    });
     expect(status.loggedIn).toBe(false);
     expect(status.issues[0]).toMatchObject({
       code: "not_logged_in",

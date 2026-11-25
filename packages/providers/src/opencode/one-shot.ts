@@ -5,7 +5,8 @@ import { type OneShotRequest, oneShotSignal, type UtilityModel } from "../utilit
 import type { OpenCodeClient } from "./client";
 import { modelRef } from "./config";
 import { cheapUtilityModel } from "./models";
-import type { OcModel, OcModelRef } from "./protocol";
+import type { OcModelRef } from "./protocol";
+import { readProviderCatalog } from "./ready";
 import { OpenCodeServer } from "./server";
 
 /** Empty string = no model chosen in Settings: a cheap one is picked (`cheapUtilityModel`). */
@@ -61,11 +62,10 @@ async function cheapModel(
   signal: AbortSignal,
 ): Promise<OcModelRef | undefined> {
   try {
-    const [byDefault, list] = await Promise.all([
-      client.get<{ data?: OcModel | null }>("/api/model/default", signal),
-      client.get<{ data?: OcModel[] }>("/api/model", signal),
-    ]);
-    return cheapUtilityModel(list?.data ?? [], byDefault?.data);
+    // The lists load asynchronously after the server prints its URL (#651): read them the
+    // same settling way the picker probe does, so utility jobs keep their cheap model.
+    const catalog = await readProviderCatalog(client, signal);
+    return cheapUtilityModel(catalog.models, catalog.defaultModel);
   } catch (error) {
     if (signal.aborted) throw error;
     return undefined;
