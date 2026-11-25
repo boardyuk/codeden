@@ -24,11 +24,12 @@ export interface OpenCodeProbe {
  * models, and stop it. No session is created and no model is called, so nothing is billed.
  * The provider and model lists are polled until they settle: OpenCode 2.4.x loads them after
  * printing its URL, and a single read at start-up sees an empty catalog (#651).
+ * `projectConfig`: a project's own config (`readProjectConfig`), for that project's list.
  * Rejects on failure or after `timeoutMs`; the server is stopped either way.
  */
 export async function probeOpenCode(
   exe: ResolvedCommand,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; projectConfig?: Record<string, unknown> } = {},
 ): Promise<OpenCodeProbe> {
   const timeoutMs = opts.timeoutMs ?? OPENCODE_PROBE_TIMEOUT_MS;
   const abort = new AbortController();
@@ -40,7 +41,7 @@ export async function probeOpenCode(
     );
   });
   try {
-    return await Promise.race([run(exe, abort.signal, timeoutMs), timeout]);
+    return await Promise.race([run(exe, abort.signal, timeoutMs, opts.projectConfig), timeout]);
   } finally {
     clearTimeout(timer);
     abort.abort();
@@ -51,12 +52,14 @@ async function run(
   exe: ResolvedCommand,
   signal: AbortSignal,
   timeoutMs: number,
+  projectConfig: Record<string, unknown> | undefined,
 ): Promise<OpenCodeProbe> {
   const server = await OpenCodeServer.start(exe, {
     cwd: tmpdir(),
     signal,
     startTimeoutMs: timeoutMs,
     requestTimeoutMs: timeoutMs,
+    ...(projectConfig ? { projectConfig } : {}),
   });
   try {
     const c = server.client;
