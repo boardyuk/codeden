@@ -59,7 +59,10 @@ function write(dir: string, rel: string, value: unknown): void {
   writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
 }
 
-const adapter = () => new OpenCodeAdapter({ executable: fakeOpenCode, noGuardPlugin: true });
+/** The fake's lists are complete at once: settle them in milliseconds, not the product's ~1.6 s. */
+const catalog = { pollMs: 10, settlePolls: 2 };
+const adapter = () =>
+  new OpenCodeAdapter({ executable: fakeOpenCode, noGuardPlugin: true, catalog });
 
 function options(extra: Partial<SessionOptions> = {}): SessionOptions {
   return {

@@ -3,7 +3,7 @@ import type { ModelInfo } from "@codeden/contracts";
 import type { ResolvedCommand } from "../util/exec";
 import { openCodeModelList } from "./models";
 import type { OcCredential, OcProvider } from "./protocol";
-import { CATALOG_DEADLINE_MS, readProviderCatalog } from "./ready";
+import { CATALOG_DEADLINE_MS, type CatalogPolling, readProviderCatalog } from "./ready";
 import { OpenCodeServer } from "./server";
 
 /** How long a probe may take, server start-up included. */
@@ -19,19 +19,27 @@ export interface OpenCodeProbe {
   models: ModelInfo[];
 }
 
+export interface OpenCodeProbeOptions {
+  timeoutMs?: number;
+  /** A project's own config (`readProjectConfig`), for that project's list. */
+  projectConfig?: Record<string, unknown>;
+  /** How the provider and model lists are polled (`readProviderCatalog`); tests shorten it. */
+  catalog?: CatalogPolling;
+}
+
 /**
  * Start a private `opencode serve` in the temp directory, read its providers, credentials and
  * models, and stop it. No session is created and no model is called, so nothing is billed.
  * The provider and model lists are polled until they settle: OpenCode 2.4.x loads them after
  * printing its URL, and a single read at start-up sees an empty catalog (#651).
- * `projectConfig`: a project's own config (`readProjectConfig`), for that project's list.
  * Rejects on failure or after `timeoutMs`; the server is stopped either way.
  */
 export async function probeOpenCode(
   exe: ResolvedCommand,
-  opts: { timeoutMs?: number; projectConfig?: Record<string, unknown> } = {},
+  opts: OpenCodeProbeOptions = {},
 ): Promise<OpenCodeProbe> {
   const timeoutMs = opts.timeoutMs ?? OPENCODE_PROBE_TIMEOUT_MS;
+  const budgetEnd = Date.now() + timeoutMs;
   const abort = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -41,7 +49,7 @@ export async function probeOpenCode(
     );
   });
   try {
-    return await Promise.race([run(exe, abort.signal, timeoutMs, opts.projectConfig), timeout]);
+    return await Promise.race([run(exe, abort.signal, timeoutMs, budgetEnd, opts), timeout]);
   } finally {
     clearTimeout(timer);
     abort.abort();
@@ -52,23 +60,28 @@ async function run(
   exe: ResolvedCommand,
   signal: AbortSignal,
   timeoutMs: number,
-  projectConfig: Record<string, unknown> | undefined,
+  /** When the probe's budget runs out (`Date.now()` time). */
+  budgetEnd: number,
+  opts: OpenCodeProbeOptions,
 ): Promise<OpenCodeProbe> {
   const server = await OpenCodeServer.start(exe, {
     cwd: tmpdir(),
     signal,
     startTimeoutMs: timeoutMs,
     requestTimeoutMs: timeoutMs,
-    ...(projectConfig ? { projectConfig } : {}),
+    ...(opts.projectConfig ? { projectConfig: opts.projectConfig } : {}),
   });
   try {
     const c = server.client;
+    // What is left of the probe's budget after the start-up, less room for a final read: a
+    // slow start still returns the lists read so far instead of timing out the whole probe.
+    const left = Math.max(0, budgetEnd - Date.now() - 1_500);
     const [info, credentials, catalog] = await Promise.all([
       c.get<{ version?: string }>("/api/info", signal).catch(() => undefined),
       c.get<{ data: OcCredential[] }>("/api/credential", signal).catch(() => ({ data: [] })),
       readProviderCatalog(c, signal, {
-        // Leave the start-up and a final response inside the caller's probe budget.
-        deadlineMs: Math.min(CATALOG_DEADLINE_MS, Math.max(1_000, timeoutMs - 1_500)),
+        ...opts.catalog,
+        deadlineMs: Math.min(opts.catalog?.deadlineMs ?? CATALOG_DEADLINE_MS, left),
       }),
     ]);
     const connected = [

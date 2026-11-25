@@ -19,6 +19,13 @@ export interface CatalogReader {
   get<T>(path: string, signal?: AbortSignal): Promise<T>;
 }
 
+/** How the catalog is polled; the defaults are the `CATALOG_*` constants. */
+export interface CatalogPolling {
+  pollMs?: number;
+  settlePolls?: number;
+  deadlineMs?: number;
+}
+
 /**
  * Read `GET /api/provider` + `GET /api/model` + `GET /api/model/default` until they settle.
  *
@@ -37,7 +44,7 @@ export interface CatalogReader {
 export async function readProviderCatalog(
   client: CatalogReader,
   signal: AbortSignal,
-  opts: { pollMs?: number; settlePolls?: number; deadlineMs?: number } = {},
+  opts: CatalogPolling = {},
 ): Promise<OcCatalog> {
   const pollMs = opts.pollMs ?? CATALOG_POLL_MS;
   const settlePolls = Math.max(1, opts.settlePolls ?? CATALOG_SETTLE_POLLS);
@@ -94,21 +101,19 @@ function catalogKey(c: OcCatalog): string {
   ].join("|");
 }
 
+/** Wait `ms`, or less when `signal` aborts. Leaves no listener behind (a read polls ~30 times). */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
     if (signal.aborted) {
-      clearTimeout(timer);
       resolve();
       return;
     }
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
   });
 }

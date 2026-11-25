@@ -17,6 +17,7 @@ import { OpenCodeUtilityModel } from "./one-shot";
 import { guardPluginDir } from "./plugin";
 import { type OpenCodeProbe, probeOpenCode } from "./probe";
 import { OpenCodeProjectModels } from "./project-models";
+import type { CatalogPolling } from "./ready";
 import { OpenCodeSession } from "./session";
 
 export const OPENCODE_PROVIDER_ID = "opencode";
@@ -55,6 +56,11 @@ export interface OpenCodeAdapterOptions {
   probeTimeoutMs?: number;
   /** Skip the env-guard plugin (tests with a fake server). */
   noGuardPlugin?: boolean;
+  /**
+   * How the provider and model lists are polled until they settle (`readProviderCatalog`), for
+   * probes and the utility model; tests with a fake server shorten the settle window.
+   */
+  catalog?: CatalogPolling;
 }
 
 /** OpenCode through a private `opencode serve` per session, over its v2 HTTP API (§7.2). */
@@ -68,7 +74,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
   /** Lists made with a project's own config (#643), per project. */
   private readonly projectLists = new OpenCodeProjectModels({
     probe: async (exe, projectConfig) =>
-      (await probeOpenCode(exe, { timeoutMs: this.options.probeTimeoutMs, projectConfig })).models,
+      (await probeOpenCode(exe, this.probeOptions(projectConfig))).models,
     global: () => this.catalog.list(),
   });
 
@@ -173,12 +179,20 @@ export class OpenCodeAdapter implements ProviderAdapter {
   }
 
   utilityModel(): UtilityModel {
-    return new OpenCodeUtilityModel(() => this.executable());
+    return new OpenCodeUtilityModel(() => this.executable(), this.options.catalog);
+  }
+
+  private probeOptions(projectConfig?: Record<string, unknown>) {
+    return {
+      timeoutMs: this.options.probeTimeoutMs,
+      ...(projectConfig ? { projectConfig } : {}),
+      ...(this.options.catalog ? { catalog: this.options.catalog } : {}),
+    };
   }
 
   /** One probe at a time; its models replace the catalog. Rejects on failure. */
   private probe(exe: ResolvedCommand): Promise<OpenCodeProbe> {
-    this.probing ??= probeOpenCode(exe, { timeoutMs: this.options.probeTimeoutMs })
+    this.probing ??= probeOpenCode(exe, this.probeOptions())
       .then(
         (result) => {
           if (result.models.length) this.setModels(result.models, exe);

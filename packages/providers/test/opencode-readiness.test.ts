@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OcCatalog } from "../src/opencode/ready";
 import { readProviderCatalog } from "../src/opencode/ready";
@@ -114,6 +115,26 @@ describe("OpenCode catalog readiness", () => {
     expect(value?.providers).toEqual([]);
     expect(value?.models).toEqual([]);
     expect(c.polls).toBe(11); // t=0..1000 inclusive
+  });
+
+  it("reads once with no time left: the probe's budget was spent starting the server", async () => {
+    vi.useFakeTimers();
+    const c = new FakeCatalog([{ providers: [], models: [], default: null }, full()]);
+    const { value, error } = await read(c, { pollMs: 100, settlePolls: 3, deadlineMs: 0 });
+    expect(error).toBeUndefined();
+    expect(value?.models).toEqual([]);
+    expect(c.polls).toBe(1);
+  });
+
+  it("leaves no abort listener on the caller's signal after polling", async () => {
+    vi.useFakeTimers();
+    const c = new FakeCatalog([{ providers: [], models: [], default: null }]);
+    const signal = new AbortController().signal;
+    const run = readProviderCatalog(c, signal, { pollMs: 100, settlePolls: 3, deadlineMs: 1_000 });
+    await vi.runAllTimersAsync();
+    await run;
+    expect(c.polls).toBe(11);
+    expect(getEventListeners(signal, "abort")).toHaveLength(0);
   });
 
   it("rejects when the server cannot answer the first read at all", async () => {
